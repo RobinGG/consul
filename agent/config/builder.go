@@ -1241,7 +1241,7 @@ func (b *Builder) expandIPs(name string, s *string) []*net.IPAddr {
 			b.err = fmt.Errorf("%s: cannot use a unix socket: %s", name, a)
 			return nil
 		default:
-			b.err = fmt.Errorf("%s: invalid address type %T", a)
+			b.err = fmt.Errorf("%s: invalid address type %T", name, a)
 			return nil
 		}
 	}
@@ -1291,7 +1291,7 @@ func (b *Builder) expandFirstIP(name string, s *string) *net.IPAddr {
 		b.err = fmt.Errorf("%s: cannot use a unix socket: %s", name, addr)
 		return nil
 	default:
-		b.err = fmt.Errorf("%s: invalid address type %T", a)
+		b.err = fmt.Errorf("%s: invalid address type %T", name, a)
 		return nil
 	}
 }
