@@ -1,1624 +1,1612 @@
 package agent
 
-import (
-	"reflect"
-	"testing"
-	"time"
-
-	"github.com/hashicorp/consul/agent/structs"
-	"github.com/hashicorp/consul/agent/token"
-	"github.com/hashicorp/consul/api"
-	"github.com/hashicorp/consul/testutil/retry"
-	"github.com/hashicorp/consul/types"
-)
-
-func TestAgentAntiEntropy_Services(t *testing.T) {
-	t.Parallel()
-	a := &TestAgent{Name: t.Name(), NoInitialSync: true}
-	a.Start()
-	defer a.Shutdown()
-
-	// Register info
-	args := &structs.RegisterRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-		Address:    "127.0.0.1",
-	}
-
-	// Exists both, same (noop)
-	var out struct{}
-	srv1 := &structs.NodeService{
-		ID:      "mysql",
-		Service: "mysql",
-		Tags:    []string{"master"},
-		Port:    5000,
-	}
-	a.state.AddService(srv1, "")
-	args.Service = srv1
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Exists both, different (update)
-	srv2 := &structs.NodeService{
-		ID:      "redis",
-		Service: "redis",
-		Tags:    []string{},
-		Port:    8000,
-	}
-	a.state.AddService(srv2, "")
-
-	srv2_mod := new(structs.NodeService)
-	*srv2_mod = *srv2
-	srv2_mod.Port = 9000
-	args.Service = srv2_mod
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Exists local (create)
-	srv3 := &structs.NodeService{
-		ID:      "web",
-		Service: "web",
-		Tags:    []string{},
-		Port:    80,
-	}
-	a.state.AddService(srv3, "")
-
-	// Exists remote (delete)
-	srv4 := &structs.NodeService{
-		ID:      "lb",
-		Service: "lb",
-		Tags:    []string{},
-		Port:    443,
-	}
-	args.Service = srv4
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Exists both, different address (update)
-	srv5 := &structs.NodeService{
-		ID:      "api",
-		Service: "api",
-		Tags:    []string{},
-		Address: "127.0.0.10",
-		Port:    8000,
-	}
-	a.state.AddService(srv5, "")
-
-	srv5_mod := new(structs.NodeService)
-	*srv5_mod = *srv5
-	srv5_mod.Address = "127.0.0.1"
-	args.Service = srv5_mod
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Exists local, in sync, remote missing (create)
-	srv6 := &structs.NodeService{
-		ID:      "cache",
-		Service: "cache",
-		Tags:    []string{},
-		Port:    11211,
-	}
-	a.state.AddService(srv6, "")
-
-	// todo(fs): data race
-	a.state.Lock()
-	a.state.serviceStatus["cache"] = syncStatus{inSync: true}
-	a.state.Unlock()
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-
-	var services structs.IndexedNodeServices
-	req := structs.NodeSpecificRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-	}
-
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		// Make sure we sent along our node info when we synced.
-		id := services.NodeServices.Node.ID
-		addrs := services.NodeServices.Node.TaggedAddresses
-		meta := services.NodeServices.Node.Meta
-		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
-		if id != a.Config.NodeID ||
-			!reflect.DeepEqual(addrs, a.Config.TaggedAddresses) ||
-			!reflect.DeepEqual(meta, a.Config.Meta) {
-			r.Fatalf("bad: %v", services.NodeServices.Node)
-		}
-
-		// We should have 6 services (consul included)
-		if len(services.NodeServices.Services) != 6 {
-			r.Fatalf("bad: %v", services.NodeServices.Services)
-		}
-
-		// All the services should match
-		for id, serv := range services.NodeServices.Services {
-			serv.CreateIndex, serv.ModifyIndex = 0, 0
-			switch id {
-			case "mysql":
-				if !reflect.DeepEqual(serv, srv1) {
-					r.Fatalf("bad: %v %v", serv, srv1)
-				}
-			case "redis":
-				if !reflect.DeepEqual(serv, srv2) {
-					r.Fatalf("bad: %#v %#v", serv, srv2)
-				}
-			case "web":
-				if !reflect.DeepEqual(serv, srv3) {
-					r.Fatalf("bad: %v %v", serv, srv3)
-				}
-			case "api":
-				if !reflect.DeepEqual(serv, srv5) {
-					r.Fatalf("bad: %v %v", serv, srv5)
-				}
-			case "cache":
-				if !reflect.DeepEqual(serv, srv6) {
-					r.Fatalf("bad: %v %v", serv, srv6)
-				}
-			case structs.ConsulServiceID:
-				// ignore
-			default:
-				r.Fatalf("unexpected service: %v", id)
-			}
-		}
-
-		// todo(fs): data race
-		a.state.RLock()
-		defer a.state.RUnlock()
-
-		// Check the local state
-		if len(a.state.services) != 5 {
-			r.Fatalf("bad: %v", a.state.services)
-		}
-		if len(a.state.serviceStatus) != 5 {
-			r.Fatalf("bad: %v", a.state.serviceStatus)
-		}
-		for name, status := range a.state.serviceStatus {
-			if !status.inSync {
-				r.Fatalf("should be in sync: %v %v", name, status)
-			}
-		}
-	})
-
-	// Remove one of the services
-	a.state.RemoveService("api")
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		// We should have 5 services (consul included)
-		if len(services.NodeServices.Services) != 5 {
-			r.Fatalf("bad: %v", services.NodeServices.Services)
-		}
-
-		// All the services should match
-		for id, serv := range services.NodeServices.Services {
-			serv.CreateIndex, serv.ModifyIndex = 0, 0
-			switch id {
-			case "mysql":
-				if !reflect.DeepEqual(serv, srv1) {
-					r.Fatalf("bad: %v %v", serv, srv1)
-				}
-			case "redis":
-				if !reflect.DeepEqual(serv, srv2) {
-					r.Fatalf("bad: %#v %#v", serv, srv2)
-				}
-			case "web":
-				if !reflect.DeepEqual(serv, srv3) {
-					r.Fatalf("bad: %v %v", serv, srv3)
-				}
-			case "cache":
-				if !reflect.DeepEqual(serv, srv6) {
-					r.Fatalf("bad: %v %v", serv, srv6)
-				}
-			case structs.ConsulServiceID:
-				// ignore
-			default:
-				r.Fatalf("unexpected service: %v", id)
-			}
-		}
-
-		// todo(fs): data race
-		a.state.RLock()
-		defer a.state.RUnlock()
-
-		// Check the local state
-		if len(a.state.services) != 4 {
-			r.Fatalf("bad: %v", a.state.services)
-		}
-		if len(a.state.serviceStatus) != 4 {
-			r.Fatalf("bad: %v", a.state.serviceStatus)
-		}
-		for name, status := range a.state.serviceStatus {
-			if !status.inSync {
-				r.Fatalf("should be in sync: %v %v", name, status)
-			}
-		}
-	})
-}
-
-func TestAgentAntiEntropy_EnableTagOverride(t *testing.T) {
-	t.Parallel()
-	a := &TestAgent{Name: t.Name(), NoInitialSync: true}
-	a.Start()
-	defer a.Shutdown()
-
-	args := &structs.RegisterRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-		Address:    "127.0.0.1",
-	}
-	var out struct{}
-
-	// EnableTagOverride = true
-	srv1 := &structs.NodeService{
-		ID:                "svc_id1",
-		Service:           "svc1",
-		Tags:              []string{"tag1"},
-		Port:              6100,
-		EnableTagOverride: true,
-	}
-	a.state.AddService(srv1, "")
-	srv1_mod := new(structs.NodeService)
-	*srv1_mod = *srv1
-	srv1_mod.Port = 7100
-	srv1_mod.Tags = []string{"tag1_mod"}
-	args.Service = srv1_mod
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// EnableTagOverride = false
-	srv2 := &structs.NodeService{
-		ID:                "svc_id2",
-		Service:           "svc2",
-		Tags:              []string{"tag2"},
-		Port:              6200,
-		EnableTagOverride: false,
-	}
-	a.state.AddService(srv2, "")
-	srv2_mod := new(structs.NodeService)
-	*srv2_mod = *srv2
-	srv2_mod.Port = 7200
-	srv2_mod.Tags = []string{"tag2_mod"}
-	args.Service = srv2_mod
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-
-	req := structs.NodeSpecificRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-	}
-	var services structs.IndexedNodeServices
-
-	retry.Run(t, func(r *retry.R) {
-		//	runtime.Gosched()
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		a.state.RLock()
-		defer a.state.RUnlock()
-
-		// All the services should match
-		for id, serv := range services.NodeServices.Services {
-			serv.CreateIndex, serv.ModifyIndex = 0, 0
-			switch id {
-			case "svc_id1":
-				if serv.ID != "svc_id1" ||
-					serv.Service != "svc1" ||
-					serv.Port != 6100 ||
-					!reflect.DeepEqual(serv.Tags, []string{"tag1_mod"}) {
-					r.Fatalf("bad: %v %v", serv, srv1)
-				}
-			case "svc_id2":
-				if serv.ID != "svc_id2" ||
-					serv.Service != "svc2" ||
-					serv.Port != 6200 ||
-					!reflect.DeepEqual(serv.Tags, []string{"tag2"}) {
-					r.Fatalf("bad: %v %v", serv, srv2)
-				}
-			case structs.ConsulServiceID:
-				// ignore
-			default:
-				r.Fatalf("unexpected service: %v", id)
-			}
-		}
-
-		// todo(fs): data race
-		a.state.RLock()
-		defer a.state.RUnlock()
-
-		for name, status := range a.state.serviceStatus {
-			if !status.inSync {
-				r.Fatalf("should be in sync: %v %v", name, status)
-			}
-		}
-	})
-}
-
-func TestAgentAntiEntropy_Services_WithChecks(t *testing.T) {
-	t.Parallel()
-	a := NewTestAgent(t.Name(), nil)
-	defer a.Shutdown()
-
-	{
-		// Single check
-		srv := &structs.NodeService{
-			ID:      "mysql",
-			Service: "mysql",
-			Tags:    []string{"master"},
-			Port:    5000,
-		}
-		a.state.AddService(srv, "")
-
-		chk := &structs.HealthCheck{
-			Node:      a.Config.NodeName,
-			CheckID:   "mysql",
-			Name:      "mysql",
-			ServiceID: "mysql",
-			Status:    api.HealthPassing,
-		}
-		a.state.AddCheck(chk, "")
-
-		// todo(fs): data race
-		func() {
-			a.state.RLock()
-			defer a.state.RUnlock()
-
-			// Sync the service once
-			if err := a.state.syncService("mysql"); err != nil {
-				t.Fatalf("err: %s", err)
-			}
-		}()
-
-		// We should have 2 services (consul included)
-		svcReq := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-		}
-		var services structs.IndexedNodeServices
-		if err := a.RPC("Catalog.NodeServices", &svcReq, &services); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if len(services.NodeServices.Services) != 2 {
-			t.Fatalf("bad: %v", services.NodeServices.Services)
-		}
-
-		// We should have one health check
-		chkReq := structs.ServiceSpecificRequest{
-			Datacenter:  "dc1",
-			ServiceName: "mysql",
-		}
-		var checks structs.IndexedHealthChecks
-		if err := a.RPC("Health.ServiceChecks", &chkReq, &checks); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if len(checks.HealthChecks) != 1 {
-			t.Fatalf("bad: %v", checks)
-		}
-	}
-
-	{
-		// Multiple checks
-		srv := &structs.NodeService{
-			ID:      "redis",
-			Service: "redis",
-			Tags:    []string{"master"},
-			Port:    5000,
-		}
-		a.state.AddService(srv, "")
-
-		chk1 := &structs.HealthCheck{
-			Node:      a.Config.NodeName,
-			CheckID:   "redis:1",
-			Name:      "redis:1",
-			ServiceID: "redis",
-			Status:    api.HealthPassing,
-		}
-		a.state.AddCheck(chk1, "")
-
-		chk2 := &structs.HealthCheck{
-			Node:      a.Config.NodeName,
-			CheckID:   "redis:2",
-			Name:      "redis:2",
-			ServiceID: "redis",
-			Status:    api.HealthPassing,
-		}
-		a.state.AddCheck(chk2, "")
-
-		// todo(fs): data race
-		func() {
-			a.state.RLock()
-			defer a.state.RUnlock()
-
-			// Sync the service once
-			if err := a.state.syncService("redis"); err != nil {
-				t.Fatalf("err: %s", err)
-			}
-		}()
-
-		// We should have 3 services (consul included)
-		svcReq := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-		}
-		var services structs.IndexedNodeServices
-		if err := a.RPC("Catalog.NodeServices", &svcReq, &services); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if len(services.NodeServices.Services) != 3 {
-			t.Fatalf("bad: %v", services.NodeServices.Services)
-		}
-
-		// We should have two health checks
-		chkReq := structs.ServiceSpecificRequest{
-			Datacenter:  "dc1",
-			ServiceName: "redis",
-		}
-		var checks structs.IndexedHealthChecks
-		if err := a.RPC("Health.ServiceChecks", &chkReq, &checks); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if len(checks.HealthChecks) != 2 {
-			t.Fatalf("bad: %v", checks)
-		}
-	}
-}
-
-var testRegisterRules = `
-node "" {
-	policy = "write"
-}
-
-service "api" {
-	policy = "write"
-}
-
-service "consul" {
-	policy = "write"
-}
-`
-
-func TestAgentAntiEntropy_Services_ACLDeny(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDatacenter = "dc1"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLDefaultPolicy = "deny"
-	cfg.ACLEnforceVersion8 = Bool(true)
-	a := &TestAgent{Name: t.Name(), Config: cfg, NoInitialSync: true}
-	a.Start()
-	defer a.Shutdown()
-
-	// Create the ACL
-	arg := structs.ACLRequest{
-		Datacenter: "dc1",
-		Op:         structs.ACLSet,
-		ACL: structs.ACL{
-			Name:  "User token",
-			Type:  structs.ACLTypeClient,
-			Rules: testRegisterRules,
-		},
-		WriteRequest: structs.WriteRequest{
-			Token: "root",
-		},
-	}
-	var token string
-	if err := a.RPC("ACL.Apply", &arg, &token); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Create service (disallowed)
-	srv1 := &structs.NodeService{
-		ID:      "mysql",
-		Service: "mysql",
-		Tags:    []string{"master"},
-		Port:    5000,
-	}
-	a.state.AddService(srv1, token)
-
-	// Create service (allowed)
-	srv2 := &structs.NodeService{
-		ID:      "api",
-		Service: "api",
-		Tags:    []string{"foo"},
-		Port:    5001,
-	}
-	a.state.AddService(srv2, token)
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify that we are in sync
-	{
-		req := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-			QueryOptions: structs.QueryOptions{
-				Token: "root",
-			},
-		}
-		var services structs.IndexedNodeServices
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		// We should have 2 services (consul included)
-		if len(services.NodeServices.Services) != 2 {
-			t.Fatalf("bad: %v", services.NodeServices.Services)
-		}
-
-		// All the services should match
-		for id, serv := range services.NodeServices.Services {
-			serv.CreateIndex, serv.ModifyIndex = 0, 0
-			switch id {
-			case "mysql":
-				t.Fatalf("should not be permitted")
-			case "api":
-				if !reflect.DeepEqual(serv, srv2) {
-					t.Fatalf("bad: %#v %#v", serv, srv2)
-				}
-			case structs.ConsulServiceID:
-				// ignore
-			default:
-				t.Fatalf("unexpected service: %v", id)
-			}
-		}
-
-		// todo(fs): data race
-		func() {
-			a.state.RLock()
-			defer a.state.RUnlock()
-
-			// Check the local state
-			if len(a.state.services) != 2 {
-				t.Fatalf("bad: %v", a.state.services)
-			}
-			if len(a.state.serviceStatus) != 2 {
-				t.Fatalf("bad: %v", a.state.serviceStatus)
-			}
-			for name, status := range a.state.serviceStatus {
-				if !status.inSync {
-					t.Fatalf("should be in sync: %v %v", name, status)
-				}
-			}
-		}()
-	}
-
-	// Now remove the service and re-sync
-	a.state.RemoveService("api")
-	a.StartSync()
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify that we are in sync
-	{
-		req := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-			QueryOptions: structs.QueryOptions{
-				Token: "root",
-			},
-		}
-		var services structs.IndexedNodeServices
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		// We should have 1 service (just consul)
-		if len(services.NodeServices.Services) != 1 {
-			t.Fatalf("bad: %v", services.NodeServices.Services)
-		}
-
-		// All the services should match
-		for id, serv := range services.NodeServices.Services {
-			serv.CreateIndex, serv.ModifyIndex = 0, 0
-			switch id {
-			case "mysql":
-				t.Fatalf("should not be permitted")
-			case "api":
-				t.Fatalf("should be deleted")
-			case structs.ConsulServiceID:
-				// ignore
-			default:
-				t.Fatalf("unexpected service: %v", id)
-			}
-		}
-
-		// todo(fs): data race
-		func() {
-			a.state.RLock()
-			defer a.state.RUnlock()
-
-			// Check the local state
-			if len(a.state.services) != 1 {
-				t.Fatalf("bad: %v", a.state.services)
-			}
-			if len(a.state.serviceStatus) != 1 {
-				t.Fatalf("bad: %v", a.state.serviceStatus)
-			}
-			for name, status := range a.state.serviceStatus {
-				if !status.inSync {
-					t.Fatalf("should be in sync: %v %v", name, status)
-				}
-			}
-		}()
-	}
-
-	// Make sure the token got cleaned up.
-	if token := a.state.ServiceToken("api"); token != "" {
-		t.Fatalf("bad: %s", token)
-	}
-}
-
-func TestAgentAntiEntropy_Checks(t *testing.T) {
-	t.Parallel()
-	a := &TestAgent{Name: t.Name(), NoInitialSync: true}
-	a.Start()
-	defer a.Shutdown()
-
-	// Register info
-	args := &structs.RegisterRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-		Address:    "127.0.0.1",
-	}
-
-	// Exists both, same (noop)
-	var out struct{}
-	chk1 := &structs.HealthCheck{
-		Node:    a.Config.NodeName,
-		CheckID: "mysql",
-		Name:    "mysql",
-		Status:  api.HealthPassing,
-	}
-	a.state.AddCheck(chk1, "")
-	args.Check = chk1
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Exists both, different (update)
-	chk2 := &structs.HealthCheck{
-		Node:    a.Config.NodeName,
-		CheckID: "redis",
-		Name:    "redis",
-		Status:  api.HealthPassing,
-	}
-	a.state.AddCheck(chk2, "")
-
-	chk2_mod := new(structs.HealthCheck)
-	*chk2_mod = *chk2
-	chk2_mod.Status = api.HealthCritical
-	args.Check = chk2_mod
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Exists local (create)
-	chk3 := &structs.HealthCheck{
-		Node:    a.Config.NodeName,
-		CheckID: "web",
-		Name:    "web",
-		Status:  api.HealthPassing,
-	}
-	a.state.AddCheck(chk3, "")
-
-	// Exists remote (delete)
-	chk4 := &structs.HealthCheck{
-		Node:    a.Config.NodeName,
-		CheckID: "lb",
-		Name:    "lb",
-		Status:  api.HealthPassing,
-	}
-	args.Check = chk4
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Exists local, in sync, remote missing (create)
-	chk5 := &structs.HealthCheck{
-		Node:    a.Config.NodeName,
-		CheckID: "cache",
-		Name:    "cache",
-		Status:  api.HealthPassing,
-	}
-	a.state.AddCheck(chk5, "")
-
-	// todo(fs): data race
-	a.state.Lock()
-	a.state.checkStatus["cache"] = syncStatus{inSync: true}
-	a.state.Unlock()
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-
-	req := structs.NodeSpecificRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-	}
-	var checks structs.IndexedHealthChecks
-
-	// Verify that we are in sync
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		// We should have 5 checks (serf included)
-		if len(checks.HealthChecks) != 5 {
-			r.Fatalf("bad: %v", checks)
-		}
-
-		// All the checks should match
-		for _, chk := range checks.HealthChecks {
-			chk.CreateIndex, chk.ModifyIndex = 0, 0
-			switch chk.CheckID {
-			case "mysql":
-				if !reflect.DeepEqual(chk, chk1) {
-					r.Fatalf("bad: %v %v", chk, chk1)
-				}
-			case "redis":
-				if !reflect.DeepEqual(chk, chk2) {
-					r.Fatalf("bad: %v %v", chk, chk2)
-				}
-			case "web":
-				if !reflect.DeepEqual(chk, chk3) {
-					r.Fatalf("bad: %v %v", chk, chk3)
-				}
-			case "cache":
-				if !reflect.DeepEqual(chk, chk5) {
-					r.Fatalf("bad: %v %v", chk, chk5)
-				}
-			case "serfHealth":
-				// ignore
-			default:
-				r.Fatalf("unexpected check: %v", chk)
-			}
-		}
-	})
-
-	// todo(fs): data race
-	func() {
-		a.state.RLock()
-		defer a.state.RUnlock()
-
-		// Check the local state
-		if len(a.state.checks) != 4 {
-			t.Fatalf("bad: %v", a.state.checks)
-		}
-		if len(a.state.checkStatus) != 4 {
-			t.Fatalf("bad: %v", a.state.checkStatus)
-		}
-		for name, status := range a.state.checkStatus {
-			if !status.inSync {
-				t.Fatalf("should be in sync: %v %v", name, status)
-			}
-		}
-	}()
-
-	// Make sure we sent along our node info addresses when we synced.
-	{
-		req := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-		}
-		var services structs.IndexedNodeServices
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		id := services.NodeServices.Node.ID
-		addrs := services.NodeServices.Node.TaggedAddresses
-		meta := services.NodeServices.Node.Meta
-		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
-		if id != a.Config.NodeID ||
-			!reflect.DeepEqual(addrs, a.Config.TaggedAddresses) ||
-			!reflect.DeepEqual(meta, a.Config.Meta) {
-			t.Fatalf("bad: %v", services.NodeServices.Node)
-		}
-	}
-
-	// Remove one of the checks
-	a.state.RemoveCheck("redis")
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-
-	// Verify that we are in sync
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		// We should have 5 checks (serf included)
-		if len(checks.HealthChecks) != 4 {
-			r.Fatalf("bad: %v", checks)
-		}
-
-		// All the checks should match
-		for _, chk := range checks.HealthChecks {
-			chk.CreateIndex, chk.ModifyIndex = 0, 0
-			switch chk.CheckID {
-			case "mysql":
-				if !reflect.DeepEqual(chk, chk1) {
-					r.Fatalf("bad: %v %v", chk, chk1)
-				}
-			case "web":
-				if !reflect.DeepEqual(chk, chk3) {
-					r.Fatalf("bad: %v %v", chk, chk3)
-				}
-			case "cache":
-				if !reflect.DeepEqual(chk, chk5) {
-					r.Fatalf("bad: %v %v", chk, chk5)
-				}
-			case "serfHealth":
-				// ignore
-			default:
-				r.Fatalf("unexpected check: %v", chk)
-			}
-		}
-	})
-
-	// todo(fs): data race
-	func() {
-		a.state.RLock()
-		defer a.state.RUnlock()
-
-		// Check the local state
-		if len(a.state.checks) != 3 {
-			t.Fatalf("bad: %v", a.state.checks)
-		}
-		if len(a.state.checkStatus) != 3 {
-			t.Fatalf("bad: %v", a.state.checkStatus)
-		}
-		for name, status := range a.state.checkStatus {
-			if !status.inSync {
-				t.Fatalf("should be in sync: %v %v", name, status)
-			}
-		}
-	}()
-}
-
-func TestAgentAntiEntropy_Checks_ACLDeny(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDatacenter = "dc1"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLDefaultPolicy = "deny"
-	cfg.ACLEnforceVersion8 = Bool(true)
-	a := &TestAgent{Name: t.Name(), Config: cfg, NoInitialSync: true}
-	a.Start()
-	defer a.Shutdown()
-
-	// Create the ACL
-	arg := structs.ACLRequest{
-		Datacenter: "dc1",
-		Op:         structs.ACLSet,
-		ACL: structs.ACL{
-			Name:  "User token",
-			Type:  structs.ACLTypeClient,
-			Rules: testRegisterRules,
-		},
-		WriteRequest: structs.WriteRequest{
-			Token: "root",
-		},
-	}
-	var token string
-	if err := a.RPC("ACL.Apply", &arg, &token); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Create services using the root token
-	srv1 := &structs.NodeService{
-		ID:      "mysql",
-		Service: "mysql",
-		Tags:    []string{"master"},
-		Port:    5000,
-	}
-	a.state.AddService(srv1, "root")
-	srv2 := &structs.NodeService{
-		ID:      "api",
-		Service: "api",
-		Tags:    []string{"foo"},
-		Port:    5001,
-	}
-	a.state.AddService(srv2, "root")
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify that we are in sync
-	{
-		req := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-			QueryOptions: structs.QueryOptions{
-				Token: "root",
-			},
-		}
-		var services structs.IndexedNodeServices
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		// We should have 3 services (consul included)
-		if len(services.NodeServices.Services) != 3 {
-			t.Fatalf("bad: %v", services.NodeServices.Services)
-		}
-
-		// All the services should match
-		for id, serv := range services.NodeServices.Services {
-			serv.CreateIndex, serv.ModifyIndex = 0, 0
-			switch id {
-			case "mysql":
-				if !reflect.DeepEqual(serv, srv1) {
-					t.Fatalf("bad: %#v %#v", serv, srv1)
-				}
-			case "api":
-				if !reflect.DeepEqual(serv, srv2) {
-					t.Fatalf("bad: %#v %#v", serv, srv2)
-				}
-			case structs.ConsulServiceID:
-				// ignore
-			default:
-				t.Fatalf("unexpected service: %v", id)
-			}
-		}
-
-		// todo(fs): data race
-		func() {
-			a.state.RLock()
-			defer a.state.RUnlock()
-
-			// Check the local state
-			if len(a.state.services) != 2 {
-				t.Fatalf("bad: %v", a.state.services)
-			}
-			if len(a.state.serviceStatus) != 2 {
-				t.Fatalf("bad: %v", a.state.serviceStatus)
-			}
-			for name, status := range a.state.serviceStatus {
-				if !status.inSync {
-					t.Fatalf("should be in sync: %v %v", name, status)
-				}
-			}
-		}()
-	}
-
-	// This check won't be allowed.
-	chk1 := &structs.HealthCheck{
-		Node:        a.Config.NodeName,
-		ServiceID:   "mysql",
-		ServiceName: "mysql",
-		ServiceTags: []string{"master"},
-		CheckID:     "mysql-check",
-		Name:        "mysql",
-		Status:      api.HealthPassing,
-	}
-	a.state.AddCheck(chk1, token)
-
-	// This one will be allowed.
-	chk2 := &structs.HealthCheck{
-		Node:        a.Config.NodeName,
-		ServiceID:   "api",
-		ServiceName: "api",
-		ServiceTags: []string{"foo"},
-		CheckID:     "api-check",
-		Name:        "api",
-		Status:      api.HealthPassing,
-	}
-	a.state.AddCheck(chk2, token)
-
-	// Trigger anti-entropy run and wait.
-	a.StartSync()
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify that we are in sync
-	retry.Run(t, func(r *retry.R) {
-		req := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-			QueryOptions: structs.QueryOptions{
-				Token: "root",
-			},
-		}
-		var checks structs.IndexedHealthChecks
-		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		// We should have 2 checks (serf included)
-		if len(checks.HealthChecks) != 2 {
-			r.Fatalf("bad: %v", checks)
-		}
-
-		// All the checks should match
-		for _, chk := range checks.HealthChecks {
-			chk.CreateIndex, chk.ModifyIndex = 0, 0
-			switch chk.CheckID {
-			case "mysql-check":
-				t.Fatalf("should not be permitted")
-			case "api-check":
-				if !reflect.DeepEqual(chk, chk2) {
-					r.Fatalf("bad: %v %v", chk, chk2)
-				}
-			case "serfHealth":
-				// ignore
-			default:
-				r.Fatalf("unexpected check: %v", chk)
-			}
-		}
-	})
-
-	// todo(fs): data race
-	func() {
-		a.state.RLock()
-		defer a.state.RUnlock()
-
-		// Check the local state.
-		if len(a.state.checks) != 2 {
-			t.Fatalf("bad: %v", a.state.checks)
-		}
-		if len(a.state.checkStatus) != 2 {
-			t.Fatalf("bad: %v", a.state.checkStatus)
-		}
-		for name, status := range a.state.checkStatus {
-			if !status.inSync {
-				t.Fatalf("should be in sync: %v %v", name, status)
-			}
-		}
-	}()
-
-	// Now delete the check and wait for sync.
-	a.state.RemoveCheck("api-check")
-	a.StartSync()
-	time.Sleep(200 * time.Millisecond)
-	// Verify that we are in sync
-	retry.Run(t, func(r *retry.R) {
-		req := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-			QueryOptions: structs.QueryOptions{
-				Token: "root",
-			},
-		}
-		var checks structs.IndexedHealthChecks
-		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		// We should have 1 check (just serf)
-		if len(checks.HealthChecks) != 1 {
-			r.Fatalf("bad: %v", checks)
-		}
-
-		// All the checks should match
-		for _, chk := range checks.HealthChecks {
-			chk.CreateIndex, chk.ModifyIndex = 0, 0
-			switch chk.CheckID {
-			case "mysql-check":
-				r.Fatalf("should not be permitted")
-			case "api-check":
-				r.Fatalf("should be deleted")
-			case "serfHealth":
-				// ignore
-			default:
-				r.Fatalf("unexpected check: %v", chk)
-			}
-		}
-	})
-
-	// todo(fs): data race
-	func() {
-		a.state.RLock()
-		defer a.state.RUnlock()
-
-		// Check the local state.
-		if len(a.state.checks) != 1 {
-			t.Fatalf("bad: %v", a.state.checks)
-		}
-		if len(a.state.checkStatus) != 1 {
-			t.Fatalf("bad: %v", a.state.checkStatus)
-		}
-		for name, status := range a.state.checkStatus {
-			if !status.inSync {
-				t.Fatalf("should be in sync: %v %v", name, status)
-			}
-		}
-	}()
-
-	// Make sure the token got cleaned up.
-	if token := a.state.CheckToken("api-check"); token != "" {
-		t.Fatalf("bad: %s", token)
-	}
-}
-
-func TestAgentAntiEntropy_Check_DeferSync(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.CheckUpdateInterval = 500 * time.Millisecond
-	a := &TestAgent{Name: t.Name(), Config: cfg, NoInitialSync: true}
-	a.Start()
-	defer a.Shutdown()
-
-	// Create a check
-	check := &structs.HealthCheck{
-		Node:    a.Config.NodeName,
-		CheckID: "web",
-		Name:    "web",
-		Status:  api.HealthPassing,
-		Output:  "",
-	}
-	a.state.AddCheck(check, "")
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-
-	// Verify that we are in sync
-	req := structs.NodeSpecificRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-	}
-	var checks structs.IndexedHealthChecks
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-		if got, want := len(checks.HealthChecks), 2; got != want {
-			r.Fatalf("got %d health checks want %d", got, want)
-		}
-	})
-
-	// Update the check output! Should be deferred
-	a.state.UpdateCheck("web", api.HealthPassing, "output")
-
-	// Should not update for 500 milliseconds
-	time.Sleep(250 * time.Millisecond)
-	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Verify not updated
-	for _, chk := range checks.HealthChecks {
-		switch chk.CheckID {
-		case "web":
-			if chk.Output != "" {
-				t.Fatalf("early update: %v", chk)
-			}
-		}
-	}
-	// Wait for a deferred update
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-			r.Fatal(err)
-		}
-
-		// Verify updated
-		for _, chk := range checks.HealthChecks {
-			switch chk.CheckID {
-			case "web":
-				if chk.Output != "output" {
-					r.Fatalf("no update: %v", chk)
-				}
-			}
-		}
-	})
-
-	// Change the output in the catalog to force it out of sync.
-	eCopy := check.Clone()
-	eCopy.Output = "changed"
-	reg := structs.RegisterRequest{
-		Datacenter:      a.Config.Datacenter,
-		Node:            a.Config.NodeName,
-		Address:         a.Config.AdvertiseAddr,
-		TaggedAddresses: a.Config.TaggedAddresses,
-		Check:           eCopy,
-		WriteRequest:    structs.WriteRequest{},
-	}
-	var out struct{}
-	if err := a.RPC("Catalog.Register", &reg, &out); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-
-	// Verify that the output is out of sync.
-	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	for _, chk := range checks.HealthChecks {
-		switch chk.CheckID {
-		case "web":
-			if chk.Output != "changed" {
-				t.Fatalf("unexpected update: %v", chk)
-			}
-		}
-	}
-
-	// Trigger anti-entropy run and wait.
-	a.StartSync()
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify that the output was synced back to the agent's value.
-	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	for _, chk := range checks.HealthChecks {
-		switch chk.CheckID {
-		case "web":
-			if chk.Output != "output" {
-				t.Fatalf("missed update: %v", chk)
-			}
-		}
-	}
-
-	// Reset the catalog again.
-	if err := a.RPC("Catalog.Register", &reg, &out); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-
-	// Verify that the output is out of sync.
-	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	for _, chk := range checks.HealthChecks {
-		switch chk.CheckID {
-		case "web":
-			if chk.Output != "changed" {
-				t.Fatalf("unexpected update: %v", chk)
-			}
-		}
-	}
-
-	// Now make an update that should be deferred.
-	a.state.UpdateCheck("web", api.HealthPassing, "deferred")
-
-	// Trigger anti-entropy run and wait.
-	a.StartSync()
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify that the output is still out of sync since there's a deferred
-	// update pending.
-	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	for _, chk := range checks.HealthChecks {
-		switch chk.CheckID {
-		case "web":
-			if chk.Output != "changed" {
-				t.Fatalf("unexpected update: %v", chk)
-			}
-		}
-	}
-	// Wait for the deferred update.
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-			r.Fatal(err)
-		}
-
-		// Verify updated
-		for _, chk := range checks.HealthChecks {
-			switch chk.CheckID {
-			case "web":
-				if chk.Output != "deferred" {
-					r.Fatalf("no update: %v", chk)
-				}
-			}
-		}
-	})
-
-}
-
-func TestAgentAntiEntropy_NodeInfo(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.NodeID = types.NodeID("40e4a748-2192-161a-0510-9bf59fe950b5")
-	cfg.Meta["somekey"] = "somevalue"
-	a := &TestAgent{Name: t.Name(), Config: cfg, NoInitialSync: true}
-	a.Start()
-	defer a.Shutdown()
-
-	// Register info
-	args := &structs.RegisterRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-		Address:    "127.0.0.1",
-	}
-	var out struct{}
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-
-	req := structs.NodeSpecificRequest{
-		Datacenter: "dc1",
-		Node:       a.Config.NodeName,
-	}
-	var services structs.IndexedNodeServices
-	// Wait for the sync
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		// Make sure we synced our node info - this should have ridden on the
-		// "consul" service sync
-		id := services.NodeServices.Node.ID
-		addrs := services.NodeServices.Node.TaggedAddresses
-		meta := services.NodeServices.Node.Meta
-		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
-		if id != cfg.NodeID ||
-			!reflect.DeepEqual(addrs, cfg.TaggedAddresses) ||
-			!reflect.DeepEqual(meta, cfg.Meta) {
-			r.Fatalf("bad: %v", services.NodeServices.Node)
-		}
-	})
-
-	// Blow away the catalog version of the node info
-	if err := a.RPC("Catalog.Register", args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Trigger anti-entropy run and wait
-	a.StartSync()
-	// Wait for the sync - this should have been a sync of just the node info
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			r.Fatalf("err: %v", err)
-		}
-
-		id := services.NodeServices.Node.ID
-		addrs := services.NodeServices.Node.TaggedAddresses
-		meta := services.NodeServices.Node.Meta
-		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
-		if id != cfg.NodeID ||
-			!reflect.DeepEqual(addrs, cfg.TaggedAddresses) ||
-			!reflect.DeepEqual(meta, cfg.Meta) {
-			r.Fatalf("bad: %v", services.NodeServices.Node)
-		}
-	})
-}
-
-func TestAgentAntiEntropy_deleteService_fails(t *testing.T) {
-	t.Parallel()
-	l := new(localState)
-
-	// todo(fs): data race
-	l.Lock()
-	defer l.Unlock()
-	if err := l.deleteService(""); err == nil {
-		t.Fatalf("should have failed")
-	}
-}
-
-func TestAgentAntiEntropy_deleteCheck_fails(t *testing.T) {
-	t.Parallel()
-	l := new(localState)
-
-	// todo(fs): data race
-	l.Lock()
-	defer l.Unlock()
-	if err := l.deleteCheck(""); err == nil {
-		t.Fatalf("should have errored")
-	}
-}
-
-func TestAgent_serviceTokens(t *testing.T) {
-	t.Parallel()
-
-	tokens := new(token.Store)
-	tokens.UpdateUserToken("default")
-	l := NewLocalState(TestConfig(), nil, tokens)
-
-	l.AddService(&structs.NodeService{
-		ID: "redis",
-	}, "")
-
-	// Returns default when no token is set
-	if token := l.ServiceToken("redis"); token != "default" {
-		t.Fatalf("bad: %s", token)
-	}
-
-	// Returns configured token
-	l.serviceTokens["redis"] = "abc123"
-	if token := l.ServiceToken("redis"); token != "abc123" {
-		t.Fatalf("bad: %s", token)
-	}
-
-	// Keeps token around for the delete
-	l.RemoveService("redis")
-	if token := l.ServiceToken("redis"); token != "abc123" {
-		t.Fatalf("bad: %s", token)
-	}
-}
-
-func TestAgent_checkTokens(t *testing.T) {
-	t.Parallel()
-
-	tokens := new(token.Store)
-	tokens.UpdateUserToken("default")
-	l := NewLocalState(TestConfig(), nil, tokens)
-
-	// Returns default when no token is set
-	if token := l.CheckToken("mem"); token != "default" {
-		t.Fatalf("bad: %s", token)
-	}
-
-	// Returns configured token
-	l.checkTokens["mem"] = "abc123"
-	if token := l.CheckToken("mem"); token != "abc123" {
-		t.Fatalf("bad: %s", token)
-	}
-
-	// Keeps token around for the delete
-	l.RemoveCheck("mem")
-	if token := l.CheckToken("mem"); token != "abc123" {
-		t.Fatalf("bad: %s", token)
-	}
-}
-
-func TestAgent_checkCriticalTime(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	l := NewLocalState(cfg, nil, new(token.Store))
-
-	svc := &structs.NodeService{ID: "redis", Service: "redis", Port: 8000}
-	l.AddService(svc, "")
-
-	// Add a passing check and make sure it's not critical.
-	checkID := types.CheckID("redis:1")
-	chk := &structs.HealthCheck{
-		Node:      "node",
-		CheckID:   checkID,
-		Name:      "redis:1",
-		ServiceID: "redis",
-		Status:    api.HealthPassing,
-	}
-	l.AddCheck(chk, "")
-	if checks := l.CriticalChecks(); len(checks) > 0 {
-		t.Fatalf("should not have any critical checks")
-	}
-
-	// Set it to warning and make sure that doesn't show up as critical.
-	l.UpdateCheck(checkID, api.HealthWarning, "")
-	if checks := l.CriticalChecks(); len(checks) > 0 {
-		t.Fatalf("should not have any critical checks")
-	}
-
-	// Fail the check and make sure the time looks reasonable.
-	l.UpdateCheck(checkID, api.HealthCritical, "")
-	if crit, ok := l.CriticalChecks()[checkID]; !ok {
-		t.Fatalf("should have a critical check")
-	} else if crit.CriticalFor > time.Millisecond {
-		t.Fatalf("bad: %#v", crit)
-	}
-
-	// Wait a while, then fail it again and make sure the time keeps track
-	// of the initial failure, and doesn't reset here.
-	time.Sleep(50 * time.Millisecond)
-	l.UpdateCheck(chk.CheckID, api.HealthCritical, "")
-	if crit, ok := l.CriticalChecks()[checkID]; !ok {
-		t.Fatalf("should have a critical check")
-	} else if crit.CriticalFor < 25*time.Millisecond ||
-		crit.CriticalFor > 75*time.Millisecond {
-		t.Fatalf("bad: %#v", crit)
-	}
-
-	// Set it passing again.
-	l.UpdateCheck(checkID, api.HealthPassing, "")
-	if checks := l.CriticalChecks(); len(checks) > 0 {
-		t.Fatalf("should not have any critical checks")
-	}
-
-	// Fail the check and make sure the time looks like it started again
-	// from the latest failure, not the original one.
-	l.UpdateCheck(checkID, api.HealthCritical, "")
-	if crit, ok := l.CriticalChecks()[checkID]; !ok {
-		t.Fatalf("should have a critical check")
-	} else if crit.CriticalFor > time.Millisecond {
-		t.Fatalf("bad: %#v", crit)
-	}
-}
-
-func TestAgent_AddCheckFailure(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	l := NewLocalState(cfg, nil, new(token.Store))
-
-	// Add a check for a service that does not exist and verify that it fails
-	checkID := types.CheckID("redis:1")
-	chk := &structs.HealthCheck{
-		Node:      "node",
-		CheckID:   checkID,
-		Name:      "redis:1",
-		ServiceID: "redis",
-		Status:    api.HealthPassing,
-	}
-	expectedErr := "ServiceID \"redis\" does not exist"
-	if err := l.AddCheck(chk, ""); err == nil || expectedErr != err.Error() {
-		t.Fatalf("Expected error when adding a check for a non-existent service but got %v", err)
-	}
-
-}
-
-func TestAgent_nestedPauseResume(t *testing.T) {
-	t.Parallel()
-	l := new(localState)
-	if l.isPaused() != false {
-		t.Fatal("localState should be unPaused after init")
-	}
-	l.Pause()
-	if l.isPaused() != true {
-		t.Fatal("localState should be Paused after first call to Pause()")
-	}
-	l.Pause()
-	if l.isPaused() != true {
-		t.Fatal("localState should STILL be Paused after second call to Pause()")
-	}
-	l.Resume()
-	if l.isPaused() != true {
-		t.Fatal("localState should STILL be Paused after FIRST call to Resume()")
-	}
-	l.Resume()
-	if l.isPaused() != false {
-		t.Fatal("localState should NOT be Paused after SECOND call to Resume()")
-	}
-
-	defer func() {
-		err := recover()
-		if err == nil {
-			t.Fatal("unbalanced Resume() should cause a panic()")
-		}
-	}()
-	l.Resume()
-}
-
-func TestAgent_sendCoordinate(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.SyncCoordinateRateTarget = 10.0 // updates/sec
-	cfg.SyncCoordinateIntervalMin = 1 * time.Millisecond
-	cfg.ConsulConfig.CoordinateUpdatePeriod = 100 * time.Millisecond
-	cfg.ConsulConfig.CoordinateUpdateBatchSize = 10
-	cfg.ConsulConfig.CoordinateUpdateMaxBatches = 1
-	a := NewTestAgent(t.Name(), cfg)
-	defer a.Shutdown()
-
-	// Make sure the coordinate is present.
-	req := structs.DCSpecificRequest{
-		Datacenter: a.Config.Datacenter,
-	}
-	var reply structs.IndexedCoordinates
-	retry.Run(t, func(r *retry.R) {
-		if err := a.RPC("Coordinate.ListNodes", &req, &reply); err != nil {
-			r.Fatalf("err: %s", err)
-		}
-		if len(reply.Coordinates) != 1 {
-			r.Fatalf("expected a coordinate: %v", reply)
-		}
-		coord := reply.Coordinates[0]
-		if coord.Node != a.Config.NodeName || coord.Coord == nil {
-			r.Fatalf("bad: %v", coord)
-		}
-	})
-}
+// todo(fs): func TestAgentAntiEntropy_Services(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	a := &TestAgent{Name: t.Name(), NoInitialSync: true}
+// todo(fs): 	a.Start()
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	// Register info
+// todo(fs): 	args := &structs.RegisterRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 		Address:    "127.0.0.1",
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists both, same (noop)
+// todo(fs): 	var out struct{}
+// todo(fs): 	srv1 := &structs.NodeService{
+// todo(fs): 		ID:      "mysql",
+// todo(fs): 		Service: "mysql",
+// todo(fs): 		Tags:    []string{"master"},
+// todo(fs): 		Port:    5000,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv1, "")
+// todo(fs): 	args.Service = srv1
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists both, different (update)
+// todo(fs): 	srv2 := &structs.NodeService{
+// todo(fs): 		ID:      "redis",
+// todo(fs): 		Service: "redis",
+// todo(fs): 		Tags:    []string{},
+// todo(fs): 		Port:    8000,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv2, "")
+// todo(fs):
+// todo(fs): 	srv2_mod := new(structs.NodeService)
+// todo(fs): 	*srv2_mod = *srv2
+// todo(fs): 	srv2_mod.Port = 9000
+// todo(fs): 	args.Service = srv2_mod
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists local (create)
+// todo(fs): 	srv3 := &structs.NodeService{
+// todo(fs): 		ID:      "web",
+// todo(fs): 		Service: "web",
+// todo(fs): 		Tags:    []string{},
+// todo(fs): 		Port:    80,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv3, "")
+// todo(fs):
+// todo(fs): 	// Exists remote (delete)
+// todo(fs): 	srv4 := &structs.NodeService{
+// todo(fs): 		ID:      "lb",
+// todo(fs): 		Service: "lb",
+// todo(fs): 		Tags:    []string{},
+// todo(fs): 		Port:    443,
+// todo(fs): 	}
+// todo(fs): 	args.Service = srv4
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists both, different address (update)
+// todo(fs): 	srv5 := &structs.NodeService{
+// todo(fs): 		ID:      "api",
+// todo(fs): 		Service: "api",
+// todo(fs): 		Tags:    []string{},
+// todo(fs): 		Address: "127.0.0.10",
+// todo(fs): 		Port:    8000,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv5, "")
+// todo(fs):
+// todo(fs): 	srv5_mod := new(structs.NodeService)
+// todo(fs): 	*srv5_mod = *srv5
+// todo(fs): 	srv5_mod.Address = "127.0.0.1"
+// todo(fs): 	args.Service = srv5_mod
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists local, in sync, remote missing (create)
+// todo(fs): 	srv6 := &structs.NodeService{
+// todo(fs): 		ID:      "cache",
+// todo(fs): 		Service: "cache",
+// todo(fs): 		Tags:    []string{},
+// todo(fs): 		Port:    11211,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv6, "")
+// todo(fs):
+// todo(fs): 	// todo(fs): data race
+// todo(fs): 	a.state.Lock()
+// todo(fs): 	a.state.serviceStatus["cache"] = syncStatus{inSync: true}
+// todo(fs): 	a.state.Unlock()
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs):
+// todo(fs): 	var services structs.IndexedNodeServices
+// todo(fs): 	req := structs.NodeSpecificRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// Make sure we sent along our node info when we synced.
+// todo(fs): 		id := services.NodeServices.Node.ID
+// todo(fs): 		addrs := services.NodeServices.Node.TaggedAddresses
+// todo(fs): 		meta := services.NodeServices.Node.Meta
+// todo(fs): 		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
+// todo(fs): 		if id != a.Config.NodeID ||
+// todo(fs): 			!reflect.DeepEqual(addrs, a.Config.TaggedAddresses) ||
+// todo(fs): 			!reflect.DeepEqual(meta, a.Config.NodeMeta) {
+// todo(fs): 			r.Fatalf("bad: %v", services.NodeServices.Node)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 6 services (consul included)
+// todo(fs): 		if len(services.NodeServices.Services) != 6 {
+// todo(fs): 			r.Fatalf("bad: %v", services.NodeServices.Services)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the services should match
+// todo(fs): 		for id, serv := range services.NodeServices.Services {
+// todo(fs): 			serv.CreateIndex, serv.ModifyIndex = 0, 0
+// todo(fs): 			switch id {
+// todo(fs): 			case "mysql":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv1) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv1)
+// todo(fs): 				}
+// todo(fs): 			case "redis":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv2) {
+// todo(fs): 					r.Fatalf("bad: %#v %#v", serv, srv2)
+// todo(fs): 				}
+// todo(fs): 			case "web":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv3) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv3)
+// todo(fs): 				}
+// todo(fs): 			case "api":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv5) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv5)
+// todo(fs): 				}
+// todo(fs): 			case "cache":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv6) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv6)
+// todo(fs): 				}
+// todo(fs): 			case structs.ConsulServiceID:
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				r.Fatalf("unexpected service: %v", id)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// todo(fs): data race
+// todo(fs): 		a.state.RLock()
+// todo(fs): 		defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 		// Check the local state
+// todo(fs): 		if len(a.state.services) != 5 {
+// todo(fs): 			r.Fatalf("bad: %v", a.state.services)
+// todo(fs): 		}
+// todo(fs): 		if len(a.state.serviceStatus) != 5 {
+// todo(fs): 			r.Fatalf("bad: %v", a.state.serviceStatus)
+// todo(fs): 		}
+// todo(fs): 		for name, status := range a.state.serviceStatus {
+// todo(fs): 			if !status.inSync {
+// todo(fs): 				r.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// Remove one of the services
+// todo(fs): 	a.state.RemoveService("api")
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs):
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 5 services (consul included)
+// todo(fs): 		if len(services.NodeServices.Services) != 5 {
+// todo(fs): 			r.Fatalf("bad: %v", services.NodeServices.Services)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the services should match
+// todo(fs): 		for id, serv := range services.NodeServices.Services {
+// todo(fs): 			serv.CreateIndex, serv.ModifyIndex = 0, 0
+// todo(fs): 			switch id {
+// todo(fs): 			case "mysql":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv1) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv1)
+// todo(fs): 				}
+// todo(fs): 			case "redis":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv2) {
+// todo(fs): 					r.Fatalf("bad: %#v %#v", serv, srv2)
+// todo(fs): 				}
+// todo(fs): 			case "web":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv3) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv3)
+// todo(fs): 				}
+// todo(fs): 			case "cache":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv6) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv6)
+// todo(fs): 				}
+// todo(fs): 			case structs.ConsulServiceID:
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				r.Fatalf("unexpected service: %v", id)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// todo(fs): data race
+// todo(fs): 		a.state.RLock()
+// todo(fs): 		defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 		// Check the local state
+// todo(fs): 		if len(a.state.services) != 4 {
+// todo(fs): 			r.Fatalf("bad: %v", a.state.services)
+// todo(fs): 		}
+// todo(fs): 		if len(a.state.serviceStatus) != 4 {
+// todo(fs): 			r.Fatalf("bad: %v", a.state.serviceStatus)
+// todo(fs): 		}
+// todo(fs): 		for name, status := range a.state.serviceStatus {
+// todo(fs): 			if !status.inSync {
+// todo(fs): 				r.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_EnableTagOverride(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	a := &TestAgent{Name: t.Name(), NoInitialSync: true}
+// todo(fs): 	a.Start()
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	args := &structs.RegisterRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 		Address:    "127.0.0.1",
+// todo(fs): 	}
+// todo(fs): 	var out struct{}
+// todo(fs):
+// todo(fs): 	// EnableTagOverride = true
+// todo(fs): 	srv1 := &structs.NodeService{
+// todo(fs): 		ID:                "svc_id1",
+// todo(fs): 		Service:           "svc1",
+// todo(fs): 		Tags:              []string{"tag1"},
+// todo(fs): 		Port:              6100,
+// todo(fs): 		EnableTagOverride: true,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv1, "")
+// todo(fs): 	srv1_mod := new(structs.NodeService)
+// todo(fs): 	*srv1_mod = *srv1
+// todo(fs): 	srv1_mod.Port = 7100
+// todo(fs): 	srv1_mod.Tags = []string{"tag1_mod"}
+// todo(fs): 	args.Service = srv1_mod
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// EnableTagOverride = false
+// todo(fs): 	srv2 := &structs.NodeService{
+// todo(fs): 		ID:                "svc_id2",
+// todo(fs): 		Service:           "svc2",
+// todo(fs): 		Tags:              []string{"tag2"},
+// todo(fs): 		Port:              6200,
+// todo(fs): 		EnableTagOverride: false,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv2, "")
+// todo(fs): 	srv2_mod := new(structs.NodeService)
+// todo(fs): 	*srv2_mod = *srv2
+// todo(fs): 	srv2_mod.Port = 7200
+// todo(fs): 	srv2_mod.Tags = []string{"tag2_mod"}
+// todo(fs): 	args.Service = srv2_mod
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs):
+// todo(fs): 	req := structs.NodeSpecificRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 	}
+// todo(fs): 	var services structs.IndexedNodeServices
+// todo(fs):
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		//	runtime.Gosched()
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		a.state.RLock()
+// todo(fs): 		defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 		// All the services should match
+// todo(fs): 		for id, serv := range services.NodeServices.Services {
+// todo(fs): 			serv.CreateIndex, serv.ModifyIndex = 0, 0
+// todo(fs): 			switch id {
+// todo(fs): 			case "svc_id1":
+// todo(fs): 				if serv.ID != "svc_id1" ||
+// todo(fs): 					serv.Service != "svc1" ||
+// todo(fs): 					serv.Port != 6100 ||
+// todo(fs): 					!reflect.DeepEqual(serv.Tags, []string{"tag1_mod"}) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv1)
+// todo(fs): 				}
+// todo(fs): 			case "svc_id2":
+// todo(fs): 				if serv.ID != "svc_id2" ||
+// todo(fs): 					serv.Service != "svc2" ||
+// todo(fs): 					serv.Port != 6200 ||
+// todo(fs): 					!reflect.DeepEqual(serv.Tags, []string{"tag2"}) {
+// todo(fs): 					r.Fatalf("bad: %v %v", serv, srv2)
+// todo(fs): 				}
+// todo(fs): 			case structs.ConsulServiceID:
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				r.Fatalf("unexpected service: %v", id)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// todo(fs): data race
+// todo(fs): 		a.state.RLock()
+// todo(fs): 		defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 		for name, status := range a.state.serviceStatus {
+// todo(fs): 			if !status.inSync {
+// todo(fs): 				r.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_Services_WithChecks(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	a := NewTestAgent(t.Name(), nil)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	{
+// todo(fs): 		// Single check
+// todo(fs): 		srv := &structs.NodeService{
+// todo(fs): 			ID:      "mysql",
+// todo(fs): 			Service: "mysql",
+// todo(fs): 			Tags:    []string{"master"},
+// todo(fs): 			Port:    5000,
+// todo(fs): 		}
+// todo(fs): 		a.state.AddService(srv, "")
+// todo(fs):
+// todo(fs): 		chk := &structs.HealthCheck{
+// todo(fs): 			Node:      a.Config.NodeName,
+// todo(fs): 			CheckID:   "mysql",
+// todo(fs): 			Name:      "mysql",
+// todo(fs): 			ServiceID: "mysql",
+// todo(fs): 			Status:    api.HealthPassing,
+// todo(fs): 		}
+// todo(fs): 		a.state.AddCheck(chk, "")
+// todo(fs):
+// todo(fs): 		// todo(fs): data race
+// todo(fs): 		func() {
+// todo(fs): 			a.state.RLock()
+// todo(fs): 			defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 			// Sync the service once
+// todo(fs): 			if err := a.state.syncService("mysql"); err != nil {
+// todo(fs): 				t.Fatalf("err: %s", err)
+// todo(fs): 			}
+// todo(fs): 		}()
+// todo(fs):
+// todo(fs): 		// We should have 2 services (consul included)
+// todo(fs): 		svcReq := structs.NodeSpecificRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 		}
+// todo(fs): 		var services structs.IndexedNodeServices
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &svcReq, &services); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if len(services.NodeServices.Services) != 2 {
+// todo(fs): 			t.Fatalf("bad: %v", services.NodeServices.Services)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have one health check
+// todo(fs): 		chkReq := structs.ServiceSpecificRequest{
+// todo(fs): 			Datacenter:  "dc1",
+// todo(fs): 			ServiceName: "mysql",
+// todo(fs): 		}
+// todo(fs): 		var checks structs.IndexedHealthChecks
+// todo(fs): 		if err := a.RPC("Health.ServiceChecks", &chkReq, &checks); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if len(checks.HealthChecks) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", checks)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	{
+// todo(fs): 		// Multiple checks
+// todo(fs): 		srv := &structs.NodeService{
+// todo(fs): 			ID:      "redis",
+// todo(fs): 			Service: "redis",
+// todo(fs): 			Tags:    []string{"master"},
+// todo(fs): 			Port:    5000,
+// todo(fs): 		}
+// todo(fs): 		a.state.AddService(srv, "")
+// todo(fs):
+// todo(fs): 		chk1 := &structs.HealthCheck{
+// todo(fs): 			Node:      a.Config.NodeName,
+// todo(fs): 			CheckID:   "redis:1",
+// todo(fs): 			Name:      "redis:1",
+// todo(fs): 			ServiceID: "redis",
+// todo(fs): 			Status:    api.HealthPassing,
+// todo(fs): 		}
+// todo(fs): 		a.state.AddCheck(chk1, "")
+// todo(fs):
+// todo(fs): 		chk2 := &structs.HealthCheck{
+// todo(fs): 			Node:      a.Config.NodeName,
+// todo(fs): 			CheckID:   "redis:2",
+// todo(fs): 			Name:      "redis:2",
+// todo(fs): 			ServiceID: "redis",
+// todo(fs): 			Status:    api.HealthPassing,
+// todo(fs): 		}
+// todo(fs): 		a.state.AddCheck(chk2, "")
+// todo(fs):
+// todo(fs): 		// todo(fs): data race
+// todo(fs): 		func() {
+// todo(fs): 			a.state.RLock()
+// todo(fs): 			defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 			// Sync the service once
+// todo(fs): 			if err := a.state.syncService("redis"); err != nil {
+// todo(fs): 				t.Fatalf("err: %s", err)
+// todo(fs): 			}
+// todo(fs): 		}()
+// todo(fs):
+// todo(fs): 		// We should have 3 services (consul included)
+// todo(fs): 		svcReq := structs.NodeSpecificRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 		}
+// todo(fs): 		var services structs.IndexedNodeServices
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &svcReq, &services); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if len(services.NodeServices.Services) != 3 {
+// todo(fs): 			t.Fatalf("bad: %v", services.NodeServices.Services)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have two health checks
+// todo(fs): 		chkReq := structs.ServiceSpecificRequest{
+// todo(fs): 			Datacenter:  "dc1",
+// todo(fs): 			ServiceName: "redis",
+// todo(fs): 		}
+// todo(fs): 		var checks structs.IndexedHealthChecks
+// todo(fs): 		if err := a.RPC("Health.ServiceChecks", &chkReq, &checks); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if len(checks.HealthChecks) != 2 {
+// todo(fs): 			t.Fatalf("bad: %v", checks)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): var testRegisterRules = `
+// todo(fs): node "" {
+// todo(fs): 	policy = "write"
+// todo(fs): }
+// todo(fs):
+// todo(fs): service "api" {
+// todo(fs): 	policy = "write"
+// todo(fs): }
+// todo(fs):
+// todo(fs): service "consul" {
+// todo(fs): 	policy = "write"
+// todo(fs): }
+// todo(fs): `
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_Services_ACLDeny(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.ACLDatacenter = "dc1"
+// todo(fs): 	cfg.ACLMasterToken = "root"
+// todo(fs): 	cfg.ACLDefaultPolicy = "deny"
+// todo(fs): 	cfg.ACLEnforceVersion8 = true
+// todo(fs): 	a := &TestAgent{Name: t.Name(), Config: cfg, NoInitialSync: true}
+// todo(fs): 	a.Start()
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	// Create the ACL
+// todo(fs): 	arg := structs.ACLRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Op:         structs.ACLSet,
+// todo(fs): 		ACL: structs.ACL{
+// todo(fs): 			Name:  "User token",
+// todo(fs): 			Type:  structs.ACLTypeClient,
+// todo(fs): 			Rules: testRegisterRules,
+// todo(fs): 		},
+// todo(fs): 		WriteRequest: structs.WriteRequest{
+// todo(fs): 			Token: "root",
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	var token string
+// todo(fs): 	if err := a.RPC("ACL.Apply", &arg, &token); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Create service (disallowed)
+// todo(fs): 	srv1 := &structs.NodeService{
+// todo(fs): 		ID:      "mysql",
+// todo(fs): 		Service: "mysql",
+// todo(fs): 		Tags:    []string{"master"},
+// todo(fs): 		Port:    5000,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv1, token)
+// todo(fs):
+// todo(fs): 	// Create service (allowed)
+// todo(fs): 	srv2 := &structs.NodeService{
+// todo(fs): 		ID:      "api",
+// todo(fs): 		Service: "api",
+// todo(fs): 		Tags:    []string{"foo"},
+// todo(fs): 		Port:    5001,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv2, token)
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs): 	time.Sleep(200 * time.Millisecond)
+// todo(fs):
+// todo(fs): 	// Verify that we are in sync
+// todo(fs): 	{
+// todo(fs): 		req := structs.NodeSpecificRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 			QueryOptions: structs.QueryOptions{
+// todo(fs): 				Token: "root",
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		var services structs.IndexedNodeServices
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 2 services (consul included)
+// todo(fs): 		if len(services.NodeServices.Services) != 2 {
+// todo(fs): 			t.Fatalf("bad: %v", services.NodeServices.Services)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the services should match
+// todo(fs): 		for id, serv := range services.NodeServices.Services {
+// todo(fs): 			serv.CreateIndex, serv.ModifyIndex = 0, 0
+// todo(fs): 			switch id {
+// todo(fs): 			case "mysql":
+// todo(fs): 				t.Fatalf("should not be permitted")
+// todo(fs): 			case "api":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv2) {
+// todo(fs): 					t.Fatalf("bad: %#v %#v", serv, srv2)
+// todo(fs): 				}
+// todo(fs): 			case structs.ConsulServiceID:
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				t.Fatalf("unexpected service: %v", id)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// todo(fs): data race
+// todo(fs): 		func() {
+// todo(fs): 			a.state.RLock()
+// todo(fs): 			defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 			// Check the local state
+// todo(fs): 			if len(a.state.services) != 2 {
+// todo(fs): 				t.Fatalf("bad: %v", a.state.services)
+// todo(fs): 			}
+// todo(fs): 			if len(a.state.serviceStatus) != 2 {
+// todo(fs): 				t.Fatalf("bad: %v", a.state.serviceStatus)
+// todo(fs): 			}
+// todo(fs): 			for name, status := range a.state.serviceStatus {
+// todo(fs): 				if !status.inSync {
+// todo(fs): 					t.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 				}
+// todo(fs): 			}
+// todo(fs): 		}()
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Now remove the service and re-sync
+// todo(fs): 	a.state.RemoveService("api")
+// todo(fs): 	a.StartSync()
+// todo(fs): 	time.Sleep(200 * time.Millisecond)
+// todo(fs):
+// todo(fs): 	// Verify that we are in sync
+// todo(fs): 	{
+// todo(fs): 		req := structs.NodeSpecificRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 			QueryOptions: structs.QueryOptions{
+// todo(fs): 				Token: "root",
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		var services structs.IndexedNodeServices
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 1 service (just consul)
+// todo(fs): 		if len(services.NodeServices.Services) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", services.NodeServices.Services)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the services should match
+// todo(fs): 		for id, serv := range services.NodeServices.Services {
+// todo(fs): 			serv.CreateIndex, serv.ModifyIndex = 0, 0
+// todo(fs): 			switch id {
+// todo(fs): 			case "mysql":
+// todo(fs): 				t.Fatalf("should not be permitted")
+// todo(fs): 			case "api":
+// todo(fs): 				t.Fatalf("should be deleted")
+// todo(fs): 			case structs.ConsulServiceID:
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				t.Fatalf("unexpected service: %v", id)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// todo(fs): data race
+// todo(fs): 		func() {
+// todo(fs): 			a.state.RLock()
+// todo(fs): 			defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 			// Check the local state
+// todo(fs): 			if len(a.state.services) != 1 {
+// todo(fs): 				t.Fatalf("bad: %v", a.state.services)
+// todo(fs): 			}
+// todo(fs): 			if len(a.state.serviceStatus) != 1 {
+// todo(fs): 				t.Fatalf("bad: %v", a.state.serviceStatus)
+// todo(fs): 			}
+// todo(fs): 			for name, status := range a.state.serviceStatus {
+// todo(fs): 				if !status.inSync {
+// todo(fs): 					t.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 				}
+// todo(fs): 			}
+// todo(fs): 		}()
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Make sure the token got cleaned up.
+// todo(fs): 	if token := a.state.ServiceToken("api"); token != "" {
+// todo(fs): 		t.Fatalf("bad: %s", token)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_Checks(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	a := &TestAgent{Name: t.Name(), NoInitialSync: true}
+// todo(fs): 	a.Start()
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	// Register info
+// todo(fs): 	args := &structs.RegisterRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 		Address:    "127.0.0.1",
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists both, same (noop)
+// todo(fs): 	var out struct{}
+// todo(fs): 	chk1 := &structs.HealthCheck{
+// todo(fs): 		Node:    a.Config.NodeName,
+// todo(fs): 		CheckID: "mysql",
+// todo(fs): 		Name:    "mysql",
+// todo(fs): 		Status:  api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddCheck(chk1, "")
+// todo(fs): 	args.Check = chk1
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists both, different (update)
+// todo(fs): 	chk2 := &structs.HealthCheck{
+// todo(fs): 		Node:    a.Config.NodeName,
+// todo(fs): 		CheckID: "redis",
+// todo(fs): 		Name:    "redis",
+// todo(fs): 		Status:  api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddCheck(chk2, "")
+// todo(fs):
+// todo(fs): 	chk2_mod := new(structs.HealthCheck)
+// todo(fs): 	*chk2_mod = *chk2
+// todo(fs): 	chk2_mod.Status = api.HealthCritical
+// todo(fs): 	args.Check = chk2_mod
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists local (create)
+// todo(fs): 	chk3 := &structs.HealthCheck{
+// todo(fs): 		Node:    a.Config.NodeName,
+// todo(fs): 		CheckID: "web",
+// todo(fs): 		Name:    "web",
+// todo(fs): 		Status:  api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddCheck(chk3, "")
+// todo(fs):
+// todo(fs): 	// Exists remote (delete)
+// todo(fs): 	chk4 := &structs.HealthCheck{
+// todo(fs): 		Node:    a.Config.NodeName,
+// todo(fs): 		CheckID: "lb",
+// todo(fs): 		Name:    "lb",
+// todo(fs): 		Status:  api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	args.Check = chk4
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Exists local, in sync, remote missing (create)
+// todo(fs): 	chk5 := &structs.HealthCheck{
+// todo(fs): 		Node:    a.Config.NodeName,
+// todo(fs): 		CheckID: "cache",
+// todo(fs): 		Name:    "cache",
+// todo(fs): 		Status:  api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddCheck(chk5, "")
+// todo(fs):
+// todo(fs): 	// todo(fs): data race
+// todo(fs): 	a.state.Lock()
+// todo(fs): 	a.state.checkStatus["cache"] = syncStatus{inSync: true}
+// todo(fs): 	a.state.Unlock()
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs):
+// todo(fs): 	req := structs.NodeSpecificRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 	}
+// todo(fs): 	var checks structs.IndexedHealthChecks
+// todo(fs):
+// todo(fs): 	// Verify that we are in sync
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 5 checks (serf included)
+// todo(fs): 		if len(checks.HealthChecks) != 5 {
+// todo(fs): 			r.Fatalf("bad: %v", checks)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the checks should match
+// todo(fs): 		for _, chk := range checks.HealthChecks {
+// todo(fs): 			chk.CreateIndex, chk.ModifyIndex = 0, 0
+// todo(fs): 			switch chk.CheckID {
+// todo(fs): 			case "mysql":
+// todo(fs): 				if !reflect.DeepEqual(chk, chk1) {
+// todo(fs): 					r.Fatalf("bad: %v %v", chk, chk1)
+// todo(fs): 				}
+// todo(fs): 			case "redis":
+// todo(fs): 				if !reflect.DeepEqual(chk, chk2) {
+// todo(fs): 					r.Fatalf("bad: %v %v", chk, chk2)
+// todo(fs): 				}
+// todo(fs): 			case "web":
+// todo(fs): 				if !reflect.DeepEqual(chk, chk3) {
+// todo(fs): 					r.Fatalf("bad: %v %v", chk, chk3)
+// todo(fs): 				}
+// todo(fs): 			case "cache":
+// todo(fs): 				if !reflect.DeepEqual(chk, chk5) {
+// todo(fs): 					r.Fatalf("bad: %v %v", chk, chk5)
+// todo(fs): 				}
+// todo(fs): 			case "serfHealth":
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				r.Fatalf("unexpected check: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// todo(fs): data race
+// todo(fs): 	func() {
+// todo(fs): 		a.state.RLock()
+// todo(fs): 		defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 		// Check the local state
+// todo(fs): 		if len(a.state.checks) != 4 {
+// todo(fs): 			t.Fatalf("bad: %v", a.state.checks)
+// todo(fs): 		}
+// todo(fs): 		if len(a.state.checkStatus) != 4 {
+// todo(fs): 			t.Fatalf("bad: %v", a.state.checkStatus)
+// todo(fs): 		}
+// todo(fs): 		for name, status := range a.state.checkStatus {
+// todo(fs): 			if !status.inSync {
+// todo(fs): 				t.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}()
+// todo(fs):
+// todo(fs): 	// Make sure we sent along our node info addresses when we synced.
+// todo(fs): 	{
+// todo(fs): 		req := structs.NodeSpecificRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 		}
+// todo(fs): 		var services structs.IndexedNodeServices
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		id := services.NodeServices.Node.ID
+// todo(fs): 		addrs := services.NodeServices.Node.TaggedAddresses
+// todo(fs): 		meta := services.NodeServices.Node.Meta
+// todo(fs): 		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
+// todo(fs): 		if id != a.Config.NodeID ||
+// todo(fs): 			!reflect.DeepEqual(addrs, a.Config.TaggedAddresses) ||
+// todo(fs): 			!reflect.DeepEqual(meta, a.Config.NodeMeta) {
+// todo(fs): 			t.Fatalf("bad: %v", services.NodeServices.Node)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Remove one of the checks
+// todo(fs): 	a.state.RemoveCheck("redis")
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs):
+// todo(fs): 	// Verify that we are in sync
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 5 checks (serf included)
+// todo(fs): 		if len(checks.HealthChecks) != 4 {
+// todo(fs): 			r.Fatalf("bad: %v", checks)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the checks should match
+// todo(fs): 		for _, chk := range checks.HealthChecks {
+// todo(fs): 			chk.CreateIndex, chk.ModifyIndex = 0, 0
+// todo(fs): 			switch chk.CheckID {
+// todo(fs): 			case "mysql":
+// todo(fs): 				if !reflect.DeepEqual(chk, chk1) {
+// todo(fs): 					r.Fatalf("bad: %v %v", chk, chk1)
+// todo(fs): 				}
+// todo(fs): 			case "web":
+// todo(fs): 				if !reflect.DeepEqual(chk, chk3) {
+// todo(fs): 					r.Fatalf("bad: %v %v", chk, chk3)
+// todo(fs): 				}
+// todo(fs): 			case "cache":
+// todo(fs): 				if !reflect.DeepEqual(chk, chk5) {
+// todo(fs): 					r.Fatalf("bad: %v %v", chk, chk5)
+// todo(fs): 				}
+// todo(fs): 			case "serfHealth":
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				r.Fatalf("unexpected check: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// todo(fs): data race
+// todo(fs): 	func() {
+// todo(fs): 		a.state.RLock()
+// todo(fs): 		defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 		// Check the local state
+// todo(fs): 		if len(a.state.checks) != 3 {
+// todo(fs): 			t.Fatalf("bad: %v", a.state.checks)
+// todo(fs): 		}
+// todo(fs): 		if len(a.state.checkStatus) != 3 {
+// todo(fs): 			t.Fatalf("bad: %v", a.state.checkStatus)
+// todo(fs): 		}
+// todo(fs): 		for name, status := range a.state.checkStatus {
+// todo(fs): 			if !status.inSync {
+// todo(fs): 				t.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}()
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_Checks_ACLDeny(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.ACLDatacenter = "dc1"
+// todo(fs): 	cfg.ACLMasterToken = "root"
+// todo(fs): 	cfg.ACLDefaultPolicy = "deny"
+// todo(fs): 	cfg.ACLEnforceVersion8 = true
+// todo(fs): 	a := &TestAgent{Name: t.Name(), Config: cfg, NoInitialSync: true}
+// todo(fs): 	a.Start()
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	// Create the ACL
+// todo(fs): 	arg := structs.ACLRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Op:         structs.ACLSet,
+// todo(fs): 		ACL: structs.ACL{
+// todo(fs): 			Name:  "User token",
+// todo(fs): 			Type:  structs.ACLTypeClient,
+// todo(fs): 			Rules: testRegisterRules,
+// todo(fs): 		},
+// todo(fs): 		WriteRequest: structs.WriteRequest{
+// todo(fs): 			Token: "root",
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	var token string
+// todo(fs): 	if err := a.RPC("ACL.Apply", &arg, &token); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Create services using the root token
+// todo(fs): 	srv1 := &structs.NodeService{
+// todo(fs): 		ID:      "mysql",
+// todo(fs): 		Service: "mysql",
+// todo(fs): 		Tags:    []string{"master"},
+// todo(fs): 		Port:    5000,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv1, "root")
+// todo(fs): 	srv2 := &structs.NodeService{
+// todo(fs): 		ID:      "api",
+// todo(fs): 		Service: "api",
+// todo(fs): 		Tags:    []string{"foo"},
+// todo(fs): 		Port:    5001,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddService(srv2, "root")
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs): 	time.Sleep(200 * time.Millisecond)
+// todo(fs):
+// todo(fs): 	// Verify that we are in sync
+// todo(fs): 	{
+// todo(fs): 		req := structs.NodeSpecificRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 			QueryOptions: structs.QueryOptions{
+// todo(fs): 				Token: "root",
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		var services structs.IndexedNodeServices
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 3 services (consul included)
+// todo(fs): 		if len(services.NodeServices.Services) != 3 {
+// todo(fs): 			t.Fatalf("bad: %v", services.NodeServices.Services)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the services should match
+// todo(fs): 		for id, serv := range services.NodeServices.Services {
+// todo(fs): 			serv.CreateIndex, serv.ModifyIndex = 0, 0
+// todo(fs): 			switch id {
+// todo(fs): 			case "mysql":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv1) {
+// todo(fs): 					t.Fatalf("bad: %#v %#v", serv, srv1)
+// todo(fs): 				}
+// todo(fs): 			case "api":
+// todo(fs): 				if !reflect.DeepEqual(serv, srv2) {
+// todo(fs): 					t.Fatalf("bad: %#v %#v", serv, srv2)
+// todo(fs): 				}
+// todo(fs): 			case structs.ConsulServiceID:
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				t.Fatalf("unexpected service: %v", id)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// todo(fs): data race
+// todo(fs): 		func() {
+// todo(fs): 			a.state.RLock()
+// todo(fs): 			defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 			// Check the local state
+// todo(fs): 			if len(a.state.services) != 2 {
+// todo(fs): 				t.Fatalf("bad: %v", a.state.services)
+// todo(fs): 			}
+// todo(fs): 			if len(a.state.serviceStatus) != 2 {
+// todo(fs): 				t.Fatalf("bad: %v", a.state.serviceStatus)
+// todo(fs): 			}
+// todo(fs): 			for name, status := range a.state.serviceStatus {
+// todo(fs): 				if !status.inSync {
+// todo(fs): 					t.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 				}
+// todo(fs): 			}
+// todo(fs): 		}()
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// This check won't be allowed.
+// todo(fs): 	chk1 := &structs.HealthCheck{
+// todo(fs): 		Node:        a.Config.NodeName,
+// todo(fs): 		ServiceID:   "mysql",
+// todo(fs): 		ServiceName: "mysql",
+// todo(fs): 		ServiceTags: []string{"master"},
+// todo(fs): 		CheckID:     "mysql-check",
+// todo(fs): 		Name:        "mysql",
+// todo(fs): 		Status:      api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddCheck(chk1, token)
+// todo(fs):
+// todo(fs): 	// This one will be allowed.
+// todo(fs): 	chk2 := &structs.HealthCheck{
+// todo(fs): 		Node:        a.Config.NodeName,
+// todo(fs): 		ServiceID:   "api",
+// todo(fs): 		ServiceName: "api",
+// todo(fs): 		ServiceTags: []string{"foo"},
+// todo(fs): 		CheckID:     "api-check",
+// todo(fs): 		Name:        "api",
+// todo(fs): 		Status:      api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	a.state.AddCheck(chk2, token)
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait.
+// todo(fs): 	a.StartSync()
+// todo(fs): 	time.Sleep(200 * time.Millisecond)
+// todo(fs):
+// todo(fs): 	// Verify that we are in sync
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		req := structs.NodeSpecificRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 			QueryOptions: structs.QueryOptions{
+// todo(fs): 				Token: "root",
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		var checks structs.IndexedHealthChecks
+// todo(fs): 		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 2 checks (serf included)
+// todo(fs): 		if len(checks.HealthChecks) != 2 {
+// todo(fs): 			r.Fatalf("bad: %v", checks)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the checks should match
+// todo(fs): 		for _, chk := range checks.HealthChecks {
+// todo(fs): 			chk.CreateIndex, chk.ModifyIndex = 0, 0
+// todo(fs): 			switch chk.CheckID {
+// todo(fs): 			case "mysql-check":
+// todo(fs): 				t.Fatalf("should not be permitted")
+// todo(fs): 			case "api-check":
+// todo(fs): 				if !reflect.DeepEqual(chk, chk2) {
+// todo(fs): 					r.Fatalf("bad: %v %v", chk, chk2)
+// todo(fs): 				}
+// todo(fs): 			case "serfHealth":
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				r.Fatalf("unexpected check: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// todo(fs): data race
+// todo(fs): 	func() {
+// todo(fs): 		a.state.RLock()
+// todo(fs): 		defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 		// Check the local state.
+// todo(fs): 		if len(a.state.checks) != 2 {
+// todo(fs): 			t.Fatalf("bad: %v", a.state.checks)
+// todo(fs): 		}
+// todo(fs): 		if len(a.state.checkStatus) != 2 {
+// todo(fs): 			t.Fatalf("bad: %v", a.state.checkStatus)
+// todo(fs): 		}
+// todo(fs): 		for name, status := range a.state.checkStatus {
+// todo(fs): 			if !status.inSync {
+// todo(fs): 				t.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}()
+// todo(fs):
+// todo(fs): 	// Now delete the check and wait for sync.
+// todo(fs): 	a.state.RemoveCheck("api-check")
+// todo(fs): 	a.StartSync()
+// todo(fs): 	time.Sleep(200 * time.Millisecond)
+// todo(fs): 	// Verify that we are in sync
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		req := structs.NodeSpecificRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 			QueryOptions: structs.QueryOptions{
+// todo(fs): 				Token: "root",
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		var checks structs.IndexedHealthChecks
+// todo(fs): 		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// We should have 1 check (just serf)
+// todo(fs): 		if len(checks.HealthChecks) != 1 {
+// todo(fs): 			r.Fatalf("bad: %v", checks)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// All the checks should match
+// todo(fs): 		for _, chk := range checks.HealthChecks {
+// todo(fs): 			chk.CreateIndex, chk.ModifyIndex = 0, 0
+// todo(fs): 			switch chk.CheckID {
+// todo(fs): 			case "mysql-check":
+// todo(fs): 				r.Fatalf("should not be permitted")
+// todo(fs): 			case "api-check":
+// todo(fs): 				r.Fatalf("should be deleted")
+// todo(fs): 			case "serfHealth":
+// todo(fs): 				// ignore
+// todo(fs): 			default:
+// todo(fs): 				r.Fatalf("unexpected check: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// todo(fs): data race
+// todo(fs): 	func() {
+// todo(fs): 		a.state.RLock()
+// todo(fs): 		defer a.state.RUnlock()
+// todo(fs):
+// todo(fs): 		// Check the local state.
+// todo(fs): 		if len(a.state.checks) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", a.state.checks)
+// todo(fs): 		}
+// todo(fs): 		if len(a.state.checkStatus) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", a.state.checkStatus)
+// todo(fs): 		}
+// todo(fs): 		for name, status := range a.state.checkStatus {
+// todo(fs): 			if !status.inSync {
+// todo(fs): 				t.Fatalf("should be in sync: %v %v", name, status)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}()
+// todo(fs):
+// todo(fs): 	// Make sure the token got cleaned up.
+// todo(fs): 	if token := a.state.CheckToken("api-check"); token != "" {
+// todo(fs): 		t.Fatalf("bad: %s", token)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_Check_DeferSync(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.CheckUpdateInterval = 500 * time.Millisecond
+// todo(fs): 	a := &TestAgent{Name: t.Name(), Config: cfg, NoInitialSync: true}
+// todo(fs): 	a.Start()
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	// Create a check
+// todo(fs): 	check := &structs.HealthCheck{
+// todo(fs): 		Node:    a.Config.NodeName,
+// todo(fs): 		CheckID: "web",
+// todo(fs): 		Name:    "web",
+// todo(fs): 		Status:  api.HealthPassing,
+// todo(fs): 		Output:  "",
+// todo(fs): 	}
+// todo(fs): 	a.state.AddCheck(check, "")
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs):
+// todo(fs): 	// Verify that we are in sync
+// todo(fs): 	req := structs.NodeSpecificRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 	}
+// todo(fs): 	var checks structs.IndexedHealthChecks
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if got, want := len(checks.HealthChecks), 2; got != want {
+// todo(fs): 			r.Fatalf("got %d health checks want %d", got, want)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// Update the check output! Should be deferred
+// todo(fs): 	a.state.UpdateCheck("web", api.HealthPassing, "output")
+// todo(fs):
+// todo(fs): 	// Should not update for 500 milliseconds
+// todo(fs): 	time.Sleep(250 * time.Millisecond)
+// todo(fs): 	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Verify not updated
+// todo(fs): 	for _, chk := range checks.HealthChecks {
+// todo(fs): 		switch chk.CheckID {
+// todo(fs): 		case "web":
+// todo(fs): 			if chk.Output != "" {
+// todo(fs): 				t.Fatalf("early update: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs): 	// Wait for a deferred update
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 			r.Fatal(err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// Verify updated
+// todo(fs): 		for _, chk := range checks.HealthChecks {
+// todo(fs): 			switch chk.CheckID {
+// todo(fs): 			case "web":
+// todo(fs): 				if chk.Output != "output" {
+// todo(fs): 					r.Fatalf("no update: %v", chk)
+// todo(fs): 				}
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// Change the output in the catalog to force it out of sync.
+// todo(fs): 	eCopy := check.Clone()
+// todo(fs): 	eCopy.Output = "changed"
+// todo(fs): 	reg := structs.RegisterRequest{
+// todo(fs): 		Datacenter:      a.Config.Datacenter,
+// todo(fs): 		Node:            a.Config.NodeName,
+// todo(fs): 		Address:         a.Config.AdvertiseAddr,
+// todo(fs): 		TaggedAddresses: a.Config.TaggedAddresses,
+// todo(fs): 		Check:           eCopy,
+// todo(fs): 		WriteRequest:    structs.WriteRequest{},
+// todo(fs): 	}
+// todo(fs): 	var out struct{}
+// todo(fs): 	if err := a.RPC("Catalog.Register", &reg, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %s", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Verify that the output is out of sync.
+// todo(fs): 	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	for _, chk := range checks.HealthChecks {
+// todo(fs): 		switch chk.CheckID {
+// todo(fs): 		case "web":
+// todo(fs): 			if chk.Output != "changed" {
+// todo(fs): 				t.Fatalf("unexpected update: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait.
+// todo(fs): 	a.StartSync()
+// todo(fs): 	time.Sleep(200 * time.Millisecond)
+// todo(fs):
+// todo(fs): 	// Verify that the output was synced back to the agent's value.
+// todo(fs): 	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	for _, chk := range checks.HealthChecks {
+// todo(fs): 		switch chk.CheckID {
+// todo(fs): 		case "web":
+// todo(fs): 			if chk.Output != "output" {
+// todo(fs): 				t.Fatalf("missed update: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Reset the catalog again.
+// todo(fs): 	if err := a.RPC("Catalog.Register", &reg, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %s", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Verify that the output is out of sync.
+// todo(fs): 	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	for _, chk := range checks.HealthChecks {
+// todo(fs): 		switch chk.CheckID {
+// todo(fs): 		case "web":
+// todo(fs): 			if chk.Output != "changed" {
+// todo(fs): 				t.Fatalf("unexpected update: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Now make an update that should be deferred.
+// todo(fs): 	a.state.UpdateCheck("web", api.HealthPassing, "deferred")
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait.
+// todo(fs): 	a.StartSync()
+// todo(fs): 	time.Sleep(200 * time.Millisecond)
+// todo(fs):
+// todo(fs): 	// Verify that the output is still out of sync since there's a deferred
+// todo(fs): 	// update pending.
+// todo(fs): 	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	for _, chk := range checks.HealthChecks {
+// todo(fs): 		switch chk.CheckID {
+// todo(fs): 		case "web":
+// todo(fs): 			if chk.Output != "changed" {
+// todo(fs): 				t.Fatalf("unexpected update: %v", chk)
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs): 	// Wait for the deferred update.
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+// todo(fs): 			r.Fatal(err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// Verify updated
+// todo(fs): 		for _, chk := range checks.HealthChecks {
+// todo(fs): 			switch chk.CheckID {
+// todo(fs): 			case "web":
+// todo(fs): 				if chk.Output != "deferred" {
+// todo(fs): 					r.Fatalf("no update: %v", chk)
+// todo(fs): 				}
+// todo(fs): 			}
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_NodeInfo(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.NodeID = types.NodeID("40e4a748-2192-161a-0510-9bf59fe950b5")
+// todo(fs): 	cfg.Meta["somekey"] = "somevalue"
+// todo(fs): 	a := &TestAgent{Name: t.Name(), Config: cfg, NoInitialSync: true}
+// todo(fs): 	a.Start()
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	// Register info
+// todo(fs): 	args := &structs.RegisterRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 		Address:    "127.0.0.1",
+// todo(fs): 	}
+// todo(fs): 	var out struct{}
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs):
+// todo(fs): 	req := structs.NodeSpecificRequest{
+// todo(fs): 		Datacenter: "dc1",
+// todo(fs): 		Node:       a.Config.NodeName,
+// todo(fs): 	}
+// todo(fs): 	var services structs.IndexedNodeServices
+// todo(fs): 	// Wait for the sync
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		// Make sure we synced our node info - this should have ridden on the
+// todo(fs): 		// "consul" service sync
+// todo(fs): 		id := services.NodeServices.Node.ID
+// todo(fs): 		addrs := services.NodeServices.Node.TaggedAddresses
+// todo(fs): 		meta := services.NodeServices.Node.Meta
+// todo(fs): 		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
+// todo(fs): 		if id != cfg.NodeID ||
+// todo(fs): 			!reflect.DeepEqual(addrs, cfg.TaggedAddresses) ||
+// todo(fs): 			!reflect.DeepEqual(meta, cfg.Meta) {
+// todo(fs): 			r.Fatalf("bad: %v", services.NodeServices.Node)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// Blow away the catalog version of the node info
+// todo(fs): 	if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Trigger anti-entropy run and wait
+// todo(fs): 	a.StartSync()
+// todo(fs): 	// Wait for the sync - this should have been a sync of just the node info
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+// todo(fs): 			r.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		id := services.NodeServices.Node.ID
+// todo(fs): 		addrs := services.NodeServices.Node.TaggedAddresses
+// todo(fs): 		meta := services.NodeServices.Node.Meta
+// todo(fs): 		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
+// todo(fs): 		if id != cfg.NodeID ||
+// todo(fs): 			!reflect.DeepEqual(addrs, cfg.TaggedAddresses) ||
+// todo(fs): 			!reflect.DeepEqual(meta, cfg.Meta) {
+// todo(fs): 			r.Fatalf("bad: %v", services.NodeServices.Node)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_deleteService_fails(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	l := new(localState)
+// todo(fs):
+// todo(fs): 	// todo(fs): data race
+// todo(fs): 	l.Lock()
+// todo(fs): 	defer l.Unlock()
+// todo(fs): 	if err := l.deleteService(""); err == nil {
+// todo(fs): 		t.Fatalf("should have failed")
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgentAntiEntropy_deleteCheck_fails(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	l := new(localState)
+// todo(fs):
+// todo(fs): 	// todo(fs): data race
+// todo(fs): 	l.Lock()
+// todo(fs): 	defer l.Unlock()
+// todo(fs): 	if err := l.deleteCheck(""); err == nil {
+// todo(fs): 		t.Fatalf("should have errored")
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgent_serviceTokens(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs):
+// todo(fs): 	tokens := new(token.Store)
+// todo(fs): 	tokens.UpdateUserToken("default")
+// todo(fs): 	l := NewLocalState(TestConfig(), nil, tokens)
+// todo(fs):
+// todo(fs): 	l.AddService(&structs.NodeService{
+// todo(fs): 		ID: "redis",
+// todo(fs): 	}, "")
+// todo(fs):
+// todo(fs): 	// Returns default when no token is set
+// todo(fs): 	if token := l.ServiceToken("redis"); token != "default" {
+// todo(fs): 		t.Fatalf("bad: %s", token)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Returns configured token
+// todo(fs): 	l.serviceTokens["redis"] = "abc123"
+// todo(fs): 	if token := l.ServiceToken("redis"); token != "abc123" {
+// todo(fs): 		t.Fatalf("bad: %s", token)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Keeps token around for the delete
+// todo(fs): 	l.RemoveService("redis")
+// todo(fs): 	if token := l.ServiceToken("redis"); token != "abc123" {
+// todo(fs): 		t.Fatalf("bad: %s", token)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgent_checkTokens(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs):
+// todo(fs): 	tokens := new(token.Store)
+// todo(fs): 	tokens.UpdateUserToken("default")
+// todo(fs): 	l := NewLocalState(TestConfig(), nil, tokens)
+// todo(fs):
+// todo(fs): 	// Returns default when no token is set
+// todo(fs): 	if token := l.CheckToken("mem"); token != "default" {
+// todo(fs): 		t.Fatalf("bad: %s", token)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Returns configured token
+// todo(fs): 	l.checkTokens["mem"] = "abc123"
+// todo(fs): 	if token := l.CheckToken("mem"); token != "abc123" {
+// todo(fs): 		t.Fatalf("bad: %s", token)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Keeps token around for the delete
+// todo(fs): 	l.RemoveCheck("mem")
+// todo(fs): 	if token := l.CheckToken("mem"); token != "abc123" {
+// todo(fs): 		t.Fatalf("bad: %s", token)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgent_checkCriticalTime(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	l := NewLocalState(cfg, nil, new(token.Store))
+// todo(fs):
+// todo(fs): 	svc := &structs.NodeService{ID: "redis", Service: "redis", Port: 8000}
+// todo(fs): 	l.AddService(svc, "")
+// todo(fs):
+// todo(fs): 	// Add a passing check and make sure it's not critical.
+// todo(fs): 	checkID := types.CheckID("redis:1")
+// todo(fs): 	chk := &structs.HealthCheck{
+// todo(fs): 		Node:      "node",
+// todo(fs): 		CheckID:   checkID,
+// todo(fs): 		Name:      "redis:1",
+// todo(fs): 		ServiceID: "redis",
+// todo(fs): 		Status:    api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	l.AddCheck(chk, "")
+// todo(fs): 	if checks := l.CriticalChecks(); len(checks) > 0 {
+// todo(fs): 		t.Fatalf("should not have any critical checks")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Set it to warning and make sure that doesn't show up as critical.
+// todo(fs): 	l.UpdateCheck(checkID, api.HealthWarning, "")
+// todo(fs): 	if checks := l.CriticalChecks(); len(checks) > 0 {
+// todo(fs): 		t.Fatalf("should not have any critical checks")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Fail the check and make sure the time looks reasonable.
+// todo(fs): 	l.UpdateCheck(checkID, api.HealthCritical, "")
+// todo(fs): 	if crit, ok := l.CriticalChecks()[checkID]; !ok {
+// todo(fs): 		t.Fatalf("should have a critical check")
+// todo(fs): 	} else if crit.CriticalFor > time.Millisecond {
+// todo(fs): 		t.Fatalf("bad: %#v", crit)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Wait a while, then fail it again and make sure the time keeps track
+// todo(fs): 	// of the initial failure, and doesn't reset here.
+// todo(fs): 	time.Sleep(50 * time.Millisecond)
+// todo(fs): 	l.UpdateCheck(chk.CheckID, api.HealthCritical, "")
+// todo(fs): 	if crit, ok := l.CriticalChecks()[checkID]; !ok {
+// todo(fs): 		t.Fatalf("should have a critical check")
+// todo(fs): 	} else if crit.CriticalFor < 25*time.Millisecond ||
+// todo(fs): 		crit.CriticalFor > 75*time.Millisecond {
+// todo(fs): 		t.Fatalf("bad: %#v", crit)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Set it passing again.
+// todo(fs): 	l.UpdateCheck(checkID, api.HealthPassing, "")
+// todo(fs): 	if checks := l.CriticalChecks(); len(checks) > 0 {
+// todo(fs): 		t.Fatalf("should not have any critical checks")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Fail the check and make sure the time looks like it started again
+// todo(fs): 	// from the latest failure, not the original one.
+// todo(fs): 	l.UpdateCheck(checkID, api.HealthCritical, "")
+// todo(fs): 	if crit, ok := l.CriticalChecks()[checkID]; !ok {
+// todo(fs): 		t.Fatalf("should have a critical check")
+// todo(fs): 	} else if crit.CriticalFor > time.Millisecond {
+// todo(fs): 		t.Fatalf("bad: %#v", crit)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgent_AddCheckFailure(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	l := NewLocalState(cfg, nil, new(token.Store))
+// todo(fs):
+// todo(fs): 	// Add a check for a service that does not exist and verify that it fails
+// todo(fs): 	checkID := types.CheckID("redis:1")
+// todo(fs): 	chk := &structs.HealthCheck{
+// todo(fs): 		Node:      "node",
+// todo(fs): 		CheckID:   checkID,
+// todo(fs): 		Name:      "redis:1",
+// todo(fs): 		ServiceID: "redis",
+// todo(fs): 		Status:    api.HealthPassing,
+// todo(fs): 	}
+// todo(fs): 	expectedErr := "ServiceID \"redis\" does not exist"
+// todo(fs): 	if err := l.AddCheck(chk, ""); err == nil || expectedErr != err.Error() {
+// todo(fs): 		t.Fatalf("Expected error when adding a check for a non-existent service but got %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgent_nestedPauseResume(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	l := new(localState)
+// todo(fs): 	if l.isPaused() != false {
+// todo(fs): 		t.Fatal("localState should be unPaused after init")
+// todo(fs): 	}
+// todo(fs): 	l.Pause()
+// todo(fs): 	if l.isPaused() != true {
+// todo(fs): 		t.Fatal("localState should be Paused after first call to Pause()")
+// todo(fs): 	}
+// todo(fs): 	l.Pause()
+// todo(fs): 	if l.isPaused() != true {
+// todo(fs): 		t.Fatal("localState should STILL be Paused after second call to Pause()")
+// todo(fs): 	}
+// todo(fs): 	l.Resume()
+// todo(fs): 	if l.isPaused() != true {
+// todo(fs): 		t.Fatal("localState should STILL be Paused after FIRST call to Resume()")
+// todo(fs): 	}
+// todo(fs): 	l.Resume()
+// todo(fs): 	if l.isPaused() != false {
+// todo(fs): 		t.Fatal("localState should NOT be Paused after SECOND call to Resume()")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	defer func() {
+// todo(fs): 		err := recover()
+// todo(fs): 		if err == nil {
+// todo(fs): 			t.Fatal("unbalanced Resume() should cause a panic()")
+// todo(fs): 		}
+// todo(fs): 	}()
+// todo(fs): 	l.Resume()
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestAgent_sendCoordinate(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.SyncCoordinateRateTarget = 10.0 // updates/sec
+// todo(fs): 	cfg.SyncCoordinateIntervalMin = 1 * time.Millisecond
+// todo(fs): 	cfg.ConsulConfig.CoordinateUpdatePeriod = 100 * time.Millisecond
+// todo(fs): 	cfg.ConsulConfig.CoordinateUpdateBatchSize = 10
+// todo(fs): 	cfg.ConsulConfig.CoordinateUpdateMaxBatches = 1
+// todo(fs): 	a := NewTestAgent(t.Name(), cfg)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	// Make sure the coordinate is present.
+// todo(fs): 	req := structs.DCSpecificRequest{
+// todo(fs): 		Datacenter: a.Config.Datacenter,
+// todo(fs): 	}
+// todo(fs): 	var reply structs.IndexedCoordinates
+// todo(fs): 	retry.Run(t, func(r *retry.R) {
+// todo(fs): 		if err := a.RPC("Coordinate.ListNodes", &req, &reply); err != nil {
+// todo(fs): 			r.Fatalf("err: %s", err)
+// todo(fs): 		}
+// todo(fs): 		if len(reply.Coordinates) != 1 {
+// todo(fs): 			r.Fatalf("expected a coordinate: %v", reply)
+// todo(fs): 		}
+// todo(fs): 		coord := reply.Coordinates[0]
+// todo(fs): 		if coord.Node != a.Config.NodeName || coord.Coord == nil {
+// todo(fs): 			r.Fatalf("bad: %v", coord)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }

@@ -1,13 +1,7 @@
 package agent
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"reflect"
-	"testing"
 
 	"github.com/hashicorp/consul/agent/structs"
 )
@@ -68,887 +62,887 @@ func (m *MockPreparedQuery) Explain(args *structs.PreparedQueryExecuteRequest,
 	return fmt.Errorf("should not have called Explain")
 }
 
-func TestPreparedQuery_Create(t *testing.T) {
-	t.Parallel()
-	a := NewTestAgent(t.Name(), nil)
-	defer a.Shutdown()
-
-	m := MockPreparedQuery{
-		applyFn: func(args *structs.PreparedQueryRequest, reply *string) error {
-			expected := &structs.PreparedQueryRequest{
-				Datacenter: "dc1",
-				Op:         structs.PreparedQueryCreate,
-				Query: &structs.PreparedQuery{
-					Name:    "my-query",
-					Session: "my-session",
-					Service: structs.ServiceQuery{
-						Service: "my-service",
-						Failover: structs.QueryDatacenterOptions{
-							NearestN:    4,
-							Datacenters: []string{"dc1", "dc2"},
-						},
-						OnlyPassing: true,
-						Tags:        []string{"foo", "bar"},
-						NodeMeta:    map[string]string{"somekey": "somevalue"},
-					},
-					DNS: structs.QueryDNSOptions{
-						TTL: "10s",
-					},
-				},
-				WriteRequest: structs.WriteRequest{
-					Token: "my-token",
-				},
-			}
-			if !reflect.DeepEqual(args, expected) {
-				t.Fatalf("bad: %v", args)
-			}
-
-			*reply = "my-id"
-			return nil
-		},
-	}
-	if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	body := bytes.NewBuffer(nil)
-	enc := json.NewEncoder(body)
-	raw := map[string]interface{}{
-		"Name":    "my-query",
-		"Session": "my-session",
-		"Service": map[string]interface{}{
-			"Service": "my-service",
-			"Failover": map[string]interface{}{
-				"NearestN":    4,
-				"Datacenters": []string{"dc1", "dc2"},
-			},
-			"OnlyPassing": true,
-			"Tags":        []string{"foo", "bar"},
-			"NodeMeta":    map[string]string{"somekey": "somevalue"},
-		},
-		"DNS": map[string]interface{}{
-			"TTL": "10s",
-		},
-	}
-	if err := enc.Encode(raw); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	req, _ := http.NewRequest("POST", "/v1/query?token=my-token", body)
-	resp := httptest.NewRecorder()
-	obj, err := a.srv.PreparedQueryGeneral(resp, req)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if resp.Code != 200 {
-		t.Fatalf("bad code: %d", resp.Code)
-	}
-	r, ok := obj.(preparedQueryCreateResponse)
-	if !ok {
-		t.Fatalf("unexpected: %T", obj)
-	}
-	if r.ID != "my-id" {
-		t.Fatalf("bad ID: %s", r.ID)
-	}
-}
-
-func TestPreparedQuery_List(t *testing.T) {
-	t.Parallel()
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			listFn: func(args *structs.DCSpecificRequest, reply *structs.IndexedPreparedQueries) error {
-				// Return an empty response.
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQueryGeneral(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueries)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if r == nil || len(r) != 0 {
-			t.Fatalf("bad: %v", r)
-		}
-	})
-
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			listFn: func(args *structs.DCSpecificRequest, reply *structs.IndexedPreparedQueries) error {
-				expected := &structs.DCSpecificRequest{
-					Datacenter: "dc1",
-					QueryOptions: structs.QueryOptions{
-						Token:             "my-token",
-						RequireConsistent: true,
-					},
-				}
-				if !reflect.DeepEqual(args, expected) {
-					t.Fatalf("bad: %v", args)
-				}
-
-				query := &structs.PreparedQuery{
-					ID: "my-id",
-				}
-				reply.Queries = append(reply.Queries, query)
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query?token=my-token&consistent=true", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQueryGeneral(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueries)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if len(r) != 1 || r[0].ID != "my-id" {
-			t.Fatalf("bad: %v", r)
-		}
-	})
-}
-
-func TestPreparedQuery_Execute(t *testing.T) {
-	t.Parallel()
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
-				// Just return an empty response.
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQuerySpecific(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueryExecuteResponse)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if r.Nodes == nil || len(r.Nodes) != 0 {
-			t.Fatalf("bad: %v", r)
-		}
-	})
-
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
-				expected := &structs.PreparedQueryExecuteRequest{
-					Datacenter:    "dc1",
-					QueryIDOrName: "my-id",
-					Limit:         5,
-					Source: structs.QuerySource{
-						Datacenter: "dc1",
-						Node:       "my-node",
-					},
-					Agent: structs.QuerySource{
-						Datacenter: a.Config.Datacenter,
-						Node:       a.Config.NodeName,
-					},
-					QueryOptions: structs.QueryOptions{
-						Token:             "my-token",
-						RequireConsistent: true,
-					},
-				}
-				if !reflect.DeepEqual(args, expected) {
-					t.Fatalf("bad: %v", args)
-				}
-
-				// Just set something so we can tell this is returned.
-				reply.Failovers = 99
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute?token=my-token&consistent=true&near=my-node&limit=5", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQuerySpecific(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueryExecuteResponse)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if r.Failovers != 99 {
-			t.Fatalf("bad: %v", r)
-		}
-	})
-
-	// Ensure the proper params are set when no special args are passed
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
-				if args.Source.Node != "" {
-					t.Fatalf("expect node to be empty, got %q", args.Source.Node)
-				}
-				expect := structs.QuerySource{
-					Datacenter: a.Config.Datacenter,
-					Node:       a.Config.NodeName,
-				}
-				if !reflect.DeepEqual(args.Agent, expect) {
-					t.Fatalf("expect: %#v\nactual: %#v", expect, args.Agent)
-				}
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute", nil)
-		resp := httptest.NewRecorder()
-		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-	})
-
-	// Ensure WAN translation occurs for a response outside of the local DC.
-	t.Run("", func(t *testing.T) {
-		cfg := TestConfig()
-		cfg.Datacenter = "dc1"
-		cfg.TranslateWanAddrs = true
-		a := NewTestAgent(t.Name(), cfg)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
-				nodesResponse := make(structs.CheckServiceNodes, 1)
-				nodesResponse[0].Node = &structs.Node{
-					Node: "foo", Address: "127.0.0.1",
-					TaggedAddresses: map[string]string{
-						"wan": "127.0.0.2",
-					},
-				}
-				reply.Nodes = nodesResponse
-				reply.Datacenter = "dc2"
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute?dc=dc2", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQuerySpecific(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueryExecuteResponse)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if r.Nodes == nil || len(r.Nodes) != 1 {
-			t.Fatalf("bad: %v", r)
-		}
-
-		node := r.Nodes[0]
-		if node.Node.Address != "127.0.0.2" {
-			t.Fatalf("bad: %v", node.Node)
-		}
-	})
-
-	// Ensure WAN translation doesn't occur for the local DC.
-	t.Run("", func(t *testing.T) {
-		cfg := TestConfig()
-		cfg.Datacenter = "dc1"
-		cfg.TranslateWanAddrs = true
-		a := NewTestAgent(t.Name(), cfg)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
-				nodesResponse := make(structs.CheckServiceNodes, 1)
-				nodesResponse[0].Node = &structs.Node{
-					Node: "foo", Address: "127.0.0.1",
-					TaggedAddresses: map[string]string{
-						"wan": "127.0.0.2",
-					},
-				}
-				reply.Nodes = nodesResponse
-				reply.Datacenter = "dc1"
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute?dc=dc2", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQuerySpecific(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueryExecuteResponse)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if r.Nodes == nil || len(r.Nodes) != 1 {
-			t.Fatalf("bad: %v", r)
-		}
-
-		node := r.Nodes[0]
-		if node.Node.Address != "127.0.0.1" {
-			t.Fatalf("bad: %v", node.Node)
-		}
-	})
-
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/not-there/execute", body)
-		resp := httptest.NewRecorder()
-		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 404 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-	})
-}
-
-func TestPreparedQuery_Explain(t *testing.T) {
-	t.Parallel()
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			explainFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExplainResponse) error {
-				expected := &structs.PreparedQueryExecuteRequest{
-					Datacenter:    "dc1",
-					QueryIDOrName: "my-id",
-					Limit:         5,
-					Source: structs.QuerySource{
-						Datacenter: "dc1",
-						Node:       "my-node",
-					},
-					Agent: structs.QuerySource{
-						Datacenter: a.Config.Datacenter,
-						Node:       a.Config.NodeName,
-					},
-					QueryOptions: structs.QueryOptions{
-						Token:             "my-token",
-						RequireConsistent: true,
-					},
-				}
-				if !reflect.DeepEqual(args, expected) {
-					t.Fatalf("bad: %v", args)
-				}
-
-				// Just set something so we can tell this is returned.
-				reply.Query.Name = "hello"
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/my-id/explain?token=my-token&consistent=true&near=my-node&limit=5", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQuerySpecific(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueryExplainResponse)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if r.Query.Name != "hello" {
-			t.Fatalf("bad: %v", r)
-		}
-	})
-
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/not-there/explain", body)
-		resp := httptest.NewRecorder()
-		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 404 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-	})
-}
-
-func TestPreparedQuery_Get(t *testing.T) {
-	t.Parallel()
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		m := MockPreparedQuery{
-			getFn: func(args *structs.PreparedQuerySpecificRequest, reply *structs.IndexedPreparedQueries) error {
-				expected := &structs.PreparedQuerySpecificRequest{
-					Datacenter: "dc1",
-					QueryID:    "my-id",
-					QueryOptions: structs.QueryOptions{
-						Token:             "my-token",
-						RequireConsistent: true,
-					},
-				}
-				if !reflect.DeepEqual(args, expected) {
-					t.Fatalf("bad: %v", args)
-				}
-
-				query := &structs.PreparedQuery{
-					ID: "my-id",
-				}
-				reply.Queries = append(reply.Queries, query)
-				return nil
-			},
-		}
-		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/my-id?token=my-token&consistent=true", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQuerySpecific(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueries)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if len(r) != 1 || r[0].ID != "my-id" {
-			t.Fatalf("bad: %v", r)
-		}
-	})
-
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/f004177f-2c28-83b7-4229-eacc25fe55d1", body)
-		resp := httptest.NewRecorder()
-		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 404 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-	})
-}
-
-func TestPreparedQuery_Update(t *testing.T) {
-	t.Parallel()
-	a := NewTestAgent(t.Name(), nil)
-	defer a.Shutdown()
-
-	m := MockPreparedQuery{
-		applyFn: func(args *structs.PreparedQueryRequest, reply *string) error {
-			expected := &structs.PreparedQueryRequest{
-				Datacenter: "dc1",
-				Op:         structs.PreparedQueryUpdate,
-				Query: &structs.PreparedQuery{
-					ID:      "my-id",
-					Name:    "my-query",
-					Session: "my-session",
-					Service: structs.ServiceQuery{
-						Service: "my-service",
-						Failover: structs.QueryDatacenterOptions{
-							NearestN:    4,
-							Datacenters: []string{"dc1", "dc2"},
-						},
-						OnlyPassing: true,
-						Tags:        []string{"foo", "bar"},
-						NodeMeta:    map[string]string{"somekey": "somevalue"},
-					},
-					DNS: structs.QueryDNSOptions{
-						TTL: "10s",
-					},
-				},
-				WriteRequest: structs.WriteRequest{
-					Token: "my-token",
-				},
-			}
-			if !reflect.DeepEqual(args, expected) {
-				t.Fatalf("bad: %v", args)
-			}
-
-			*reply = "don't care"
-			return nil
-		},
-	}
-	if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	body := bytes.NewBuffer(nil)
-	enc := json.NewEncoder(body)
-	raw := map[string]interface{}{
-		"ID":      "this should get ignored",
-		"Name":    "my-query",
-		"Session": "my-session",
-		"Service": map[string]interface{}{
-			"Service": "my-service",
-			"Failover": map[string]interface{}{
-				"NearestN":    4,
-				"Datacenters": []string{"dc1", "dc2"},
-			},
-			"OnlyPassing": true,
-			"Tags":        []string{"foo", "bar"},
-			"NodeMeta":    map[string]string{"somekey": "somevalue"},
-		},
-		"DNS": map[string]interface{}{
-			"TTL": "10s",
-		},
-	}
-	if err := enc.Encode(raw); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	req, _ := http.NewRequest("PUT", "/v1/query/my-id?token=my-token", body)
-	resp := httptest.NewRecorder()
-	if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if resp.Code != 200 {
-		t.Fatalf("bad code: %d", resp.Code)
-	}
-}
-
-func TestPreparedQuery_Delete(t *testing.T) {
-	t.Parallel()
-	a := NewTestAgent(t.Name(), nil)
-	defer a.Shutdown()
-
-	m := MockPreparedQuery{
-		applyFn: func(args *structs.PreparedQueryRequest, reply *string) error {
-			expected := &structs.PreparedQueryRequest{
-				Datacenter: "dc1",
-				Op:         structs.PreparedQueryDelete,
-				Query: &structs.PreparedQuery{
-					ID: "my-id",
-				},
-				WriteRequest: structs.WriteRequest{
-					Token: "my-token",
-				},
-			}
-			if !reflect.DeepEqual(args, expected) {
-				t.Fatalf("bad: %v", args)
-			}
-
-			*reply = "don't care"
-			return nil
-		},
-	}
-	if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	body := bytes.NewBuffer(nil)
-	enc := json.NewEncoder(body)
-	raw := map[string]interface{}{
-		"ID": "this should get ignored",
-	}
-	if err := enc.Encode(raw); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	req, _ := http.NewRequest("DELETE", "/v1/query/my-id?token=my-token", body)
-	resp := httptest.NewRecorder()
-	if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if resp.Code != 200 {
-		t.Fatalf("bad code: %d", resp.Code)
-	}
-}
-
-func TestPreparedQuery_BadMethods(t *testing.T) {
-	t.Parallel()
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("DELETE", "/v1/query", body)
-		resp := httptest.NewRecorder()
-		if _, err := a.srv.PreparedQueryGeneral(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 405 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-	})
-
-	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t.Name(), nil)
-		defer a.Shutdown()
-
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("POST", "/v1/query/my-id", body)
-		resp := httptest.NewRecorder()
-		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 405 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-	})
-}
-
-func TestPreparedQuery_parseLimit(t *testing.T) {
-	t.Parallel()
-	body := bytes.NewBuffer(nil)
-	req, _ := http.NewRequest("GET", "/v1/query", body)
-	limit := 99
-	if err := parseLimit(req, &limit); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if limit != 0 {
-		t.Fatalf("bad limit: %d", limit)
-	}
-
-	req, _ = http.NewRequest("GET", "/v1/query?limit=11", body)
-	if err := parseLimit(req, &limit); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if limit != 11 {
-		t.Fatalf("bad limit: %d", limit)
-	}
-
-	req, _ = http.NewRequest("GET", "/v1/query?limit=bob", body)
-	if err := parseLimit(req, &limit); err == nil {
-		t.Fatalf("bad: %v", err)
-	}
-}
-
-// Since we've done exhaustive testing of the calls into the endpoints above
-// this is just a basic end-to-end sanity check to make sure things are wired
-// correctly when calling through to the real endpoints.
-func TestPreparedQuery_Integration(t *testing.T) {
-	t.Parallel()
-	a := NewTestAgent(t.Name(), nil)
-	defer a.Shutdown()
-
-	// Register a node and a service.
-	{
-		args := &structs.RegisterRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-			Address:    "127.0.0.1",
-			Service: &structs.NodeService{
-				Service: "my-service",
-			},
-		}
-		var out struct{}
-		if err := a.RPC("Catalog.Register", args, &out); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-	}
-
-	// Create a query.
-	var id string
-	{
-		body := bytes.NewBuffer(nil)
-		enc := json.NewEncoder(body)
-		raw := map[string]interface{}{
-			"Name": "my-query",
-			"Service": map[string]interface{}{
-				"Service": "my-service",
-			},
-		}
-		if err := enc.Encode(raw); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		req, _ := http.NewRequest("POST", "/v1/query", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQueryGeneral(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(preparedQueryCreateResponse)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		id = r.ID
-	}
-
-	// List them all.
-	{
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query?token=root", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQueryGeneral(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueries)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if len(r) != 1 {
-			t.Fatalf("bad: %v", r)
-		}
-	}
-
-	// Execute it.
-	{
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/"+id+"/execute", body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQuerySpecific(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueryExecuteResponse)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if len(r.Nodes) != 1 {
-			t.Fatalf("bad: %v", r)
-		}
-	}
-
-	// Read it back.
-	{
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("GET", "/v1/query/"+id, body)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.PreparedQuerySpecific(resp, req)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-		r, ok := obj.(structs.PreparedQueries)
-		if !ok {
-			t.Fatalf("unexpected: %T", obj)
-		}
-		if len(r) != 1 {
-			t.Fatalf("bad: %v", r)
-		}
-	}
-
-	// Make an update to it.
-	{
-		body := bytes.NewBuffer(nil)
-		enc := json.NewEncoder(body)
-		raw := map[string]interface{}{
-			"Name": "my-query",
-			"Service": map[string]interface{}{
-				"Service":     "my-service",
-				"OnlyPassing": true,
-			},
-		}
-		if err := enc.Encode(raw); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-
-		req, _ := http.NewRequest("PUT", "/v1/query/"+id, body)
-		resp := httptest.NewRecorder()
-		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-	}
-
-	// Delete it.
-	{
-		body := bytes.NewBuffer(nil)
-		req, _ := http.NewRequest("DELETE", "/v1/query/"+id, body)
-		resp := httptest.NewRecorder()
-		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 200 {
-			t.Fatalf("bad code: %d", resp.Code)
-		}
-	}
-}
+// todo(fs): func TestPreparedQuery_Create(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	a := NewTestAgent(t.Name(), nil)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	m := MockPreparedQuery{
+// todo(fs): 		applyFn: func(args *structs.PreparedQueryRequest, reply *string) error {
+// todo(fs): 			expected := &structs.PreparedQueryRequest{
+// todo(fs): 				Datacenter: "dc1",
+// todo(fs): 				Op:         structs.PreparedQueryCreate,
+// todo(fs): 				Query: &structs.PreparedQuery{
+// todo(fs): 					Name:    "my-query",
+// todo(fs): 					Session: "my-session",
+// todo(fs): 					Service: structs.ServiceQuery{
+// todo(fs): 						Service: "my-service",
+// todo(fs): 						Failover: structs.QueryDatacenterOptions{
+// todo(fs): 							NearestN:    4,
+// todo(fs): 							Datacenters: []string{"dc1", "dc2"},
+// todo(fs): 						},
+// todo(fs): 						OnlyPassing: true,
+// todo(fs): 						Tags:        []string{"foo", "bar"},
+// todo(fs): 						NodeMeta:    map[string]string{"somekey": "somevalue"},
+// todo(fs): 					},
+// todo(fs): 					DNS: structs.QueryDNSOptions{
+// todo(fs): 						TTL: "10s",
+// todo(fs): 					},
+// todo(fs): 				},
+// todo(fs): 				WriteRequest: structs.WriteRequest{
+// todo(fs): 					Token: "my-token",
+// todo(fs): 				},
+// todo(fs): 			}
+// todo(fs): 			if !reflect.DeepEqual(args, expected) {
+// todo(fs): 				t.Fatalf("bad: %v", args)
+// todo(fs): 			}
+// todo(fs):
+// todo(fs): 			*reply = "my-id"
+// todo(fs): 			return nil
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	body := bytes.NewBuffer(nil)
+// todo(fs): 	enc := json.NewEncoder(body)
+// todo(fs): 	raw := map[string]interface{}{
+// todo(fs): 		"Name":    "my-query",
+// todo(fs): 		"Session": "my-session",
+// todo(fs): 		"Service": map[string]interface{}{
+// todo(fs): 			"Service": "my-service",
+// todo(fs): 			"Failover": map[string]interface{}{
+// todo(fs): 				"NearestN":    4,
+// todo(fs): 				"Datacenters": []string{"dc1", "dc2"},
+// todo(fs): 			},
+// todo(fs): 			"OnlyPassing": true,
+// todo(fs): 			"Tags":        []string{"foo", "bar"},
+// todo(fs): 			"NodeMeta":    map[string]string{"somekey": "somevalue"},
+// todo(fs): 		},
+// todo(fs): 		"DNS": map[string]interface{}{
+// todo(fs): 			"TTL": "10s",
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	if err := enc.Encode(raw); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	req, _ := http.NewRequest("POST", "/v1/query?token=my-token", body)
+// todo(fs): 	resp := httptest.NewRecorder()
+// todo(fs): 	obj, err := a.srv.PreparedQueryGeneral(resp, req)
+// todo(fs): 	if err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	if resp.Code != 200 {
+// todo(fs): 		t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 	}
+// todo(fs): 	r, ok := obj.(preparedQueryCreateResponse)
+// todo(fs): 	if !ok {
+// todo(fs): 		t.Fatalf("unexpected: %T", obj)
+// todo(fs): 	}
+// todo(fs): 	if r.ID != "my-id" {
+// todo(fs): 		t.Fatalf("bad ID: %s", r.ID)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestPreparedQuery_List(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			listFn: func(args *structs.DCSpecificRequest, reply *structs.IndexedPreparedQueries) error {
+// todo(fs): 				// Return an empty response.
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQueryGeneral(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueries)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if r == nil || len(r) != 0 {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			listFn: func(args *structs.DCSpecificRequest, reply *structs.IndexedPreparedQueries) error {
+// todo(fs): 				expected := &structs.DCSpecificRequest{
+// todo(fs): 					Datacenter: "dc1",
+// todo(fs): 					QueryOptions: structs.QueryOptions{
+// todo(fs): 						Token:             "my-token",
+// todo(fs): 						RequireConsistent: true,
+// todo(fs): 					},
+// todo(fs): 				}
+// todo(fs): 				if !reflect.DeepEqual(args, expected) {
+// todo(fs): 					t.Fatalf("bad: %v", args)
+// todo(fs): 				}
+// todo(fs):
+// todo(fs): 				query := &structs.PreparedQuery{
+// todo(fs): 					ID: "my-id",
+// todo(fs): 				}
+// todo(fs): 				reply.Queries = append(reply.Queries, query)
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query?token=my-token&consistent=true", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQueryGeneral(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueries)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if len(r) != 1 || r[0].ID != "my-id" {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestPreparedQuery_Execute(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
+// todo(fs): 				// Just return an empty response.
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQuerySpecific(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueryExecuteResponse)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if r.Nodes == nil || len(r.Nodes) != 0 {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
+// todo(fs): 				expected := &structs.PreparedQueryExecuteRequest{
+// todo(fs): 					Datacenter:    "dc1",
+// todo(fs): 					QueryIDOrName: "my-id",
+// todo(fs): 					Limit:         5,
+// todo(fs): 					Source: structs.QuerySource{
+// todo(fs): 						Datacenter: "dc1",
+// todo(fs): 						Node:       "my-node",
+// todo(fs): 					},
+// todo(fs): 					Agent: structs.QuerySource{
+// todo(fs): 						Datacenter: a.Config.Datacenter,
+// todo(fs): 						Node:       a.Config.NodeName,
+// todo(fs): 					},
+// todo(fs): 					QueryOptions: structs.QueryOptions{
+// todo(fs): 						Token:             "my-token",
+// todo(fs): 						RequireConsistent: true,
+// todo(fs): 					},
+// todo(fs): 				}
+// todo(fs): 				if !reflect.DeepEqual(args, expected) {
+// todo(fs): 					t.Fatalf("bad: %v", args)
+// todo(fs): 				}
+// todo(fs):
+// todo(fs): 				// Just set something so we can tell this is returned.
+// todo(fs): 				reply.Failovers = 99
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute?token=my-token&consistent=true&near=my-node&limit=5", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQuerySpecific(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueryExecuteResponse)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if r.Failovers != 99 {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// Ensure the proper params are set when no special args are passed
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
+// todo(fs): 				if args.Source.Node != "" {
+// todo(fs): 					t.Fatalf("expect node to be empty, got %q", args.Source.Node)
+// todo(fs): 				}
+// todo(fs): 				expect := structs.QuerySource{
+// todo(fs): 					Datacenter: a.Config.Datacenter,
+// todo(fs): 					Node:       a.Config.NodeName,
+// todo(fs): 				}
+// todo(fs): 				if !reflect.DeepEqual(args.Agent, expect) {
+// todo(fs): 					t.Fatalf("expect: %#v\nactual: %#v", expect, args.Agent)
+// todo(fs): 				}
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute", nil)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// Ensure WAN translation occurs for a response outside of the local DC.
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		cfg := TestConfig()
+// todo(fs): 		cfg.Datacenter = "dc1"
+// todo(fs): 		cfg.TranslateWANAddrs = true
+// todo(fs): 		a := NewTestAgent(t.Name(), cfg)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
+// todo(fs): 				nodesResponse := make(structs.CheckServiceNodes, 1)
+// todo(fs): 				nodesResponse[0].Node = &structs.Node{
+// todo(fs): 					Node: "foo", Address: "127.0.0.1",
+// todo(fs): 					TaggedAddresses: map[string]string{
+// todo(fs): 						"wan": "127.0.0.2",
+// todo(fs): 					},
+// todo(fs): 				}
+// todo(fs): 				reply.Nodes = nodesResponse
+// todo(fs): 				reply.Datacenter = "dc2"
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute?dc=dc2", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQuerySpecific(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueryExecuteResponse)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if r.Nodes == nil || len(r.Nodes) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		node := r.Nodes[0]
+// todo(fs): 		if node.Node.Address != "127.0.0.2" {
+// todo(fs): 			t.Fatalf("bad: %v", node.Node)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	// Ensure WAN translation doesn't occur for the local DC.
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		cfg := TestConfig()
+// todo(fs): 		cfg.Datacenter = "dc1"
+// todo(fs): 		cfg.TranslateWANAddrs = true
+// todo(fs): 		a := NewTestAgent(t.Name(), cfg)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			executeFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExecuteResponse) error {
+// todo(fs): 				nodesResponse := make(structs.CheckServiceNodes, 1)
+// todo(fs): 				nodesResponse[0].Node = &structs.Node{
+// todo(fs): 					Node: "foo", Address: "127.0.0.1",
+// todo(fs): 					TaggedAddresses: map[string]string{
+// todo(fs): 						"wan": "127.0.0.2",
+// todo(fs): 					},
+// todo(fs): 				}
+// todo(fs): 				reply.Nodes = nodesResponse
+// todo(fs): 				reply.Datacenter = "dc1"
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/my-id/execute?dc=dc2", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQuerySpecific(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueryExecuteResponse)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if r.Nodes == nil || len(r.Nodes) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		node := r.Nodes[0]
+// todo(fs): 		if node.Node.Address != "127.0.0.1" {
+// todo(fs): 			t.Fatalf("bad: %v", node.Node)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/not-there/execute", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 404 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestPreparedQuery_Explain(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			explainFn: func(args *structs.PreparedQueryExecuteRequest, reply *structs.PreparedQueryExplainResponse) error {
+// todo(fs): 				expected := &structs.PreparedQueryExecuteRequest{
+// todo(fs): 					Datacenter:    "dc1",
+// todo(fs): 					QueryIDOrName: "my-id",
+// todo(fs): 					Limit:         5,
+// todo(fs): 					Source: structs.QuerySource{
+// todo(fs): 						Datacenter: "dc1",
+// todo(fs): 						Node:       "my-node",
+// todo(fs): 					},
+// todo(fs): 					Agent: structs.QuerySource{
+// todo(fs): 						Datacenter: a.Config.Datacenter,
+// todo(fs): 						Node:       a.Config.NodeName,
+// todo(fs): 					},
+// todo(fs): 					QueryOptions: structs.QueryOptions{
+// todo(fs): 						Token:             "my-token",
+// todo(fs): 						RequireConsistent: true,
+// todo(fs): 					},
+// todo(fs): 				}
+// todo(fs): 				if !reflect.DeepEqual(args, expected) {
+// todo(fs): 					t.Fatalf("bad: %v", args)
+// todo(fs): 				}
+// todo(fs):
+// todo(fs): 				// Just set something so we can tell this is returned.
+// todo(fs): 				reply.Query.Name = "hello"
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/my-id/explain?token=my-token&consistent=true&near=my-node&limit=5", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQuerySpecific(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueryExplainResponse)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if r.Query.Name != "hello" {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/not-there/explain", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 404 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestPreparedQuery_Get(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		m := MockPreparedQuery{
+// todo(fs): 			getFn: func(args *structs.PreparedQuerySpecificRequest, reply *structs.IndexedPreparedQueries) error {
+// todo(fs): 				expected := &structs.PreparedQuerySpecificRequest{
+// todo(fs): 					Datacenter: "dc1",
+// todo(fs): 					QueryID:    "my-id",
+// todo(fs): 					QueryOptions: structs.QueryOptions{
+// todo(fs): 						Token:             "my-token",
+// todo(fs): 						RequireConsistent: true,
+// todo(fs): 					},
+// todo(fs): 				}
+// todo(fs): 				if !reflect.DeepEqual(args, expected) {
+// todo(fs): 					t.Fatalf("bad: %v", args)
+// todo(fs): 				}
+// todo(fs):
+// todo(fs): 				query := &structs.PreparedQuery{
+// todo(fs): 					ID: "my-id",
+// todo(fs): 				}
+// todo(fs): 				reply.Queries = append(reply.Queries, query)
+// todo(fs): 				return nil
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/my-id?token=my-token&consistent=true", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQuerySpecific(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueries)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if len(r) != 1 || r[0].ID != "my-id" {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/f004177f-2c28-83b7-4229-eacc25fe55d1", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 404 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestPreparedQuery_Update(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	a := NewTestAgent(t.Name(), nil)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	m := MockPreparedQuery{
+// todo(fs): 		applyFn: func(args *structs.PreparedQueryRequest, reply *string) error {
+// todo(fs): 			expected := &structs.PreparedQueryRequest{
+// todo(fs): 				Datacenter: "dc1",
+// todo(fs): 				Op:         structs.PreparedQueryUpdate,
+// todo(fs): 				Query: &structs.PreparedQuery{
+// todo(fs): 					ID:      "my-id",
+// todo(fs): 					Name:    "my-query",
+// todo(fs): 					Session: "my-session",
+// todo(fs): 					Service: structs.ServiceQuery{
+// todo(fs): 						Service: "my-service",
+// todo(fs): 						Failover: structs.QueryDatacenterOptions{
+// todo(fs): 							NearestN:    4,
+// todo(fs): 							Datacenters: []string{"dc1", "dc2"},
+// todo(fs): 						},
+// todo(fs): 						OnlyPassing: true,
+// todo(fs): 						Tags:        []string{"foo", "bar"},
+// todo(fs): 						NodeMeta:    map[string]string{"somekey": "somevalue"},
+// todo(fs): 					},
+// todo(fs): 					DNS: structs.QueryDNSOptions{
+// todo(fs): 						TTL: "10s",
+// todo(fs): 					},
+// todo(fs): 				},
+// todo(fs): 				WriteRequest: structs.WriteRequest{
+// todo(fs): 					Token: "my-token",
+// todo(fs): 				},
+// todo(fs): 			}
+// todo(fs): 			if !reflect.DeepEqual(args, expected) {
+// todo(fs): 				t.Fatalf("bad: %v", args)
+// todo(fs): 			}
+// todo(fs):
+// todo(fs): 			*reply = "don't care"
+// todo(fs): 			return nil
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	body := bytes.NewBuffer(nil)
+// todo(fs): 	enc := json.NewEncoder(body)
+// todo(fs): 	raw := map[string]interface{}{
+// todo(fs): 		"ID":      "this should get ignored",
+// todo(fs): 		"Name":    "my-query",
+// todo(fs): 		"Session": "my-session",
+// todo(fs): 		"Service": map[string]interface{}{
+// todo(fs): 			"Service": "my-service",
+// todo(fs): 			"Failover": map[string]interface{}{
+// todo(fs): 				"NearestN":    4,
+// todo(fs): 				"Datacenters": []string{"dc1", "dc2"},
+// todo(fs): 			},
+// todo(fs): 			"OnlyPassing": true,
+// todo(fs): 			"Tags":        []string{"foo", "bar"},
+// todo(fs): 			"NodeMeta":    map[string]string{"somekey": "somevalue"},
+// todo(fs): 		},
+// todo(fs): 		"DNS": map[string]interface{}{
+// todo(fs): 			"TTL": "10s",
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	if err := enc.Encode(raw); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	req, _ := http.NewRequest("PUT", "/v1/query/my-id?token=my-token", body)
+// todo(fs): 	resp := httptest.NewRecorder()
+// todo(fs): 	if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	if resp.Code != 200 {
+// todo(fs): 		t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestPreparedQuery_Delete(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	a := NewTestAgent(t.Name(), nil)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	m := MockPreparedQuery{
+// todo(fs): 		applyFn: func(args *structs.PreparedQueryRequest, reply *string) error {
+// todo(fs): 			expected := &structs.PreparedQueryRequest{
+// todo(fs): 				Datacenter: "dc1",
+// todo(fs): 				Op:         structs.PreparedQueryDelete,
+// todo(fs): 				Query: &structs.PreparedQuery{
+// todo(fs): 					ID: "my-id",
+// todo(fs): 				},
+// todo(fs): 				WriteRequest: structs.WriteRequest{
+// todo(fs): 					Token: "my-token",
+// todo(fs): 				},
+// todo(fs): 			}
+// todo(fs): 			if !reflect.DeepEqual(args, expected) {
+// todo(fs): 				t.Fatalf("bad: %v", args)
+// todo(fs): 			}
+// todo(fs):
+// todo(fs): 			*reply = "don't care"
+// todo(fs): 			return nil
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	if err := a.registerEndpoint("PreparedQuery", &m); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	body := bytes.NewBuffer(nil)
+// todo(fs): 	enc := json.NewEncoder(body)
+// todo(fs): 	raw := map[string]interface{}{
+// todo(fs): 		"ID": "this should get ignored",
+// todo(fs): 	}
+// todo(fs): 	if err := enc.Encode(raw); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	req, _ := http.NewRequest("DELETE", "/v1/query/my-id?token=my-token", body)
+// todo(fs): 	resp := httptest.NewRecorder()
+// todo(fs): 	if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	if resp.Code != 200 {
+// todo(fs): 		t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestPreparedQuery_BadMethods(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("DELETE", "/v1/query", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		if _, err := a.srv.PreparedQueryGeneral(resp, req); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 405 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs):
+// todo(fs): 	t.Run("", func(t *testing.T) {
+// todo(fs): 		a := NewTestAgent(t.Name(), nil)
+// todo(fs): 		defer a.Shutdown()
+// todo(fs):
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("POST", "/v1/query/my-id", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 405 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 	})
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestPreparedQuery_parseLimit(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	body := bytes.NewBuffer(nil)
+// todo(fs): 	req, _ := http.NewRequest("GET", "/v1/query", body)
+// todo(fs): 	limit := 99
+// todo(fs): 	if err := parseLimit(req, &limit); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	if limit != 0 {
+// todo(fs): 		t.Fatalf("bad limit: %d", limit)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	req, _ = http.NewRequest("GET", "/v1/query?limit=11", body)
+// todo(fs): 	if err := parseLimit(req, &limit); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	if limit != 11 {
+// todo(fs): 		t.Fatalf("bad limit: %d", limit)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	req, _ = http.NewRequest("GET", "/v1/query?limit=bob", body)
+// todo(fs): 	if err := parseLimit(req, &limit); err == nil {
+// todo(fs): 		t.Fatalf("bad: %v", err)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): // Since we've done exhaustive testing of the calls into the endpoints above
+// todo(fs): // this is just a basic end-to-end sanity check to make sure things are wired
+// todo(fs): // correctly when calling through to the real endpoints.
+// todo(fs): func TestPreparedQuery_Integration(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	a := NewTestAgent(t.Name(), nil)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	// Register a node and a service.
+// todo(fs): 	{
+// todo(fs): 		args := &structs.RegisterRequest{
+// todo(fs): 			Datacenter: "dc1",
+// todo(fs): 			Node:       a.Config.NodeName,
+// todo(fs): 			Address:    "127.0.0.1",
+// todo(fs): 			Service: &structs.NodeService{
+// todo(fs): 				Service: "my-service",
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		var out struct{}
+// todo(fs): 		if err := a.RPC("Catalog.Register", args, &out); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Create a query.
+// todo(fs): 	var id string
+// todo(fs): 	{
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		enc := json.NewEncoder(body)
+// todo(fs): 		raw := map[string]interface{}{
+// todo(fs): 			"Name": "my-query",
+// todo(fs): 			"Service": map[string]interface{}{
+// todo(fs): 				"Service": "my-service",
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := enc.Encode(raw); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		req, _ := http.NewRequest("POST", "/v1/query", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQueryGeneral(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(preparedQueryCreateResponse)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		id = r.ID
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// List them all.
+// todo(fs): 	{
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query?token=root", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQueryGeneral(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueries)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if len(r) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Execute it.
+// todo(fs): 	{
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/"+id+"/execute", body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQuerySpecific(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueryExecuteResponse)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if len(r.Nodes) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Read it back.
+// todo(fs): 	{
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("GET", "/v1/query/"+id, body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		obj, err := a.srv.PreparedQuerySpecific(resp, req)
+// todo(fs): 		if err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 		r, ok := obj.(structs.PreparedQueries)
+// todo(fs): 		if !ok {
+// todo(fs): 			t.Fatalf("unexpected: %T", obj)
+// todo(fs): 		}
+// todo(fs): 		if len(r) != 1 {
+// todo(fs): 			t.Fatalf("bad: %v", r)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Make an update to it.
+// todo(fs): 	{
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		enc := json.NewEncoder(body)
+// todo(fs): 		raw := map[string]interface{}{
+// todo(fs): 			"Name": "my-query",
+// todo(fs): 			"Service": map[string]interface{}{
+// todo(fs): 				"Service":     "my-service",
+// todo(fs): 				"OnlyPassing": true,
+// todo(fs): 			},
+// todo(fs): 		}
+// todo(fs): 		if err := enc.Encode(raw); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs):
+// todo(fs): 		req, _ := http.NewRequest("PUT", "/v1/query/"+id, body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Delete it.
+// todo(fs): 	{
+// todo(fs): 		body := bytes.NewBuffer(nil)
+// todo(fs): 		req, _ := http.NewRequest("DELETE", "/v1/query/"+id, body)
+// todo(fs): 		resp := httptest.NewRecorder()
+// todo(fs): 		if _, err := a.srv.PreparedQuerySpecific(resp, req); err != nil {
+// todo(fs): 			t.Fatalf("err: %v", err)
+// todo(fs): 		}
+// todo(fs): 		if resp.Code != 200 {
+// todo(fs): 			t.Fatalf("bad code: %d", resp.Code)
+// todo(fs): 		}
+// todo(fs): 	}
+// todo(fs): }

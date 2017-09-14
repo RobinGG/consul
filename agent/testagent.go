@@ -6,7 +6,6 @@ import (
 	"io/ioutil"
 	"log"
 	"math/rand"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,8 +21,6 @@ import (
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/logger"
 	"github.com/hashicorp/consul/testutil/retry"
-	"github.com/hashicorp/consul/types"
-	"github.com/hashicorp/consul/version"
 	uuid "github.com/hashicorp/go-uuid"
 )
 
@@ -41,6 +38,8 @@ var TempDir = os.TempDir()
 type TestAgent struct {
 	// Name is an optional name of the agent.
 	Name string
+
+	HCL string
 
 	// Config is the agent configuration. If Config is nil then
 	// TestConfig() is used. If Config.DataDir is set then it is
@@ -85,8 +84,8 @@ type TestAgent struct {
 // configuration. It panics if the agent could not be started. The
 // caller should call Shutdown() to stop the agent and remove temporary
 // directories.
-func NewTestAgent(name string, c *config.RuntimeConfig) *TestAgent {
-	a := &TestAgent{Name: name, Config: c}
+func NewTestAgent(name string, hcl string) *TestAgent {
+	a := &TestAgent{Name: name, HCL: hcl}
 	a.Start()
 	return a
 }
@@ -101,10 +100,8 @@ func (a *TestAgent) Start() *TestAgent {
 	if a.Agent != nil {
 		panic("TestAgent already started")
 	}
-	if a.Config == nil {
-		a.Config = TestConfig()
-	}
-	if a.Config.DataDir == "" {
+	var hclDataDir string
+	if a.DataDir == "" {
 		name := "agent"
 		if a.Name != "" {
 			name = a.Name + "-agent"
@@ -114,13 +111,16 @@ func (a *TestAgent) Start() *TestAgent {
 		if err != nil {
 			panic(fmt.Sprintf("Error creating data dir %s: %s", filepath.Join(TempDir, name), err))
 		}
-		a.DataDir = d
-		a.Config.DataDir = d
+		hclDataDir = `data_dir = "` + d + `"`
 	}
 	id := UniqueID()
 
 	for i := 10; i >= 0; i-- {
-		pickRandomPorts(a.Config)
+		a.Config = TestConfig(
+			config.Source{Name: a.Name, Format: "hcl", Data: a.HCL},
+			config.Source{Name: a.Name + ".data_dir", Format: "hcl", Data: hclDataDir},
+			randomPortsSource(),
+		)
 
 		// write the keyring
 		if a.Key != "" {
@@ -227,6 +227,13 @@ func (a *TestAgent) Shutdown() error {
 	return a.Agent.ShutdownAgent()
 }
 
+func (a *TestAgent) DNSAddr() string {
+	if a.dns == nil {
+		return ""
+	}
+	return a.dns.Addr
+}
+
 func (a *TestAgent) HTTPAddr() string {
 	if a.srv == nil {
 		return ""
@@ -288,54 +295,64 @@ func TenPorts() int {
 // chance of port conflicts for concurrently executed test binaries.
 // Instead of relying on one set of ports to be sufficient we retry
 // starting the agent with different ports on port conflict.
-func pickRandomPorts(c *config.RuntimeConfig) {
+func randomPortsSource() config.Source {
 	port := TenPorts()
-	for _, a := range c.DNSAddrs {
-		if x, ok := a.(*net.TCPAddr); ok {
-			x.Port = port + 2
-		}
-		if x, ok := a.(*net.UDPAddr); ok {
-			x.Port = port + 2
-		}
+	return config.Source{
+		Name:   "ports",
+		Format: "hcl",
+		Data: `
+			ports = {
+				dns = ` + strconv.Itoa(port+2) + `
+				http = ` + strconv.Itoa(port+3) + `
+				https = -1
+				serf_lan = ` + strconv.Itoa(port+4) + `
+				serf_wan = ` + strconv.Itoa(port+5) + `
+				server = ` + strconv.Itoa(port+6) + `
+			}
+		`,
 	}
-	for _, a := range c.HTTPAddrs {
-		if x, ok := a.(*net.TCPAddr); ok {
-			x.Port = port + 2
-		}
+}
+
+func NodeID() string {
+	id, err := uuid.GenerateUUID()
+	if err != nil {
+		panic(err)
 	}
-	// when we enable HTTPS then we need to fix finding the
-	// "first" HTTP server since that might be HTTPS server
-	// c.Ports.HTTPS = port + 3
-	c.SerfBindAddrLAN.Port = port + 4
-	c.SerfAdvertiseAddrLAN.Port = c.SerfBindAddrLAN.Port
-
-	c.SerfBindAddrWAN.Port = port + 5
-	c.SerfAdvertiseAddrWAN.Port = c.SerfBindAddrWAN.Port
-
-	c.RPCBindAddr.Port = port + 6
-	c.RPCAdvertiseAddr.Port = c.RPCBindAddr.Port
+	return id
 }
 
 // TestConfig returns a unique default configuration for testing an
 // agent.
-func TestConfig() *config.RuntimeConfig {
-	nodeID, err := uuid.GenerateUUID()
-	if err != nil {
-		panic(err)
+func TestConfig(sources ...config.Source) *config.RuntimeConfig {
+	nodeID := NodeID()
+	testsrc := config.Source{
+		Name:   "test",
+		Format: "hcl",
+		Data: `
+			bind_addr = "127.0.0.1"
+			advertise_addr = "127.0.0.1"
+			datacenter = "dc1"
+			bootstratp = true
+			server = true
+			node_id = "` + nodeID + `"
+			node_name = "Node ` + nodeID + `"
+		`,
 	}
 
-	cfg := config.DefaultConfig()
+	b := &config.Builder{
+		Head:    []config.Source{config.DefaultSource, testsrc},
+		Sources: sources,
+		Tail:    []config.Source{config.NonUserSource, config.DefaultVersionSource()},
+	}
 
-	cfg.Version = version.Version
-	cfg.VersionPrerelease = "c.d"
+	cfg, err := b.BuildAndValidate()
+	if err != nil {
+		panic("Error building config: " + err.Error())
+	}
 
-	cfg.NodeID = types.NodeID(nodeID)
-	cfg.NodeName = "Node " + nodeID
-	cfg.BindAddr = &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
-	cfg.AdvertiseAddrLAN = &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}
-	cfg.Datacenter = "dc1"
-	cfg.Bootstrap = true
-	cfg.ServerMode = true
+	for _, w := range b.Warnings {
+		fmt.Println("WARNING:", w)
+	}
 
 	ccfg := consul.DefaultConfig()
 	cfg.ConsulConfig = ccfg
@@ -356,18 +373,23 @@ func TestConfig() *config.RuntimeConfig {
 
 	ccfg.CoordinateUpdatePeriod = 100 * time.Millisecond
 	ccfg.ServerHealthInterval = 10 * time.Millisecond
-	return cfg
+	return &cfg
 }
 
 // TestACLConfig returns a default configuration for testing an agent
 // with ACLs.
-func TestACLConfig() *config.RuntimeConfig {
-	cfg := TestConfig()
-	cfg.ACLDatacenter = cfg.Datacenter
-	cfg.ACLDefaultPolicy = "deny"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLAgentToken = "root"
-	cfg.ACLAgentMasterToken = "towel"
-	cfg.ACLEnforceVersion8 = true
-	return cfg
+func TestACLConfig(srcs ...config.Source) *config.RuntimeConfig {
+	src := config.Source{
+		Name:   "acl",
+		Format: "hcl",
+		Data: `
+			acl_datacenter = "dc1"
+			acl_default_policy = "deny"
+			acl_master_token = "root"
+			acl_agent_token = "root"
+			acl_agent_master_token = "towel"
+			acl_enforce_version8 = true
+		`,
+	}
+	return TestConfig(append([]config.Source{src}, srcs...)...)
 }

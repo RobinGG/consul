@@ -1,15 +1,8 @@
 package agent
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"reflect"
-	"testing"
-	"time"
 
-	"github.com/hashicorp/consul/agent/structs"
-	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/go-uuid"
 )
 
@@ -21,368 +14,368 @@ func generateUUID() (ret string) {
 	return ret
 }
 
-func TestRexecWriter(t *testing.T) {
-	// t.Parallel() // timing test. no parallel
-	writer := &rexecWriter{
-		BufCh:    make(chan []byte, 16),
-		BufSize:  16,
-		BufIdle:  100 * time.Millisecond,
-		CancelCh: make(chan struct{}),
-	}
-
-	// Write short, wait for idle
-	start := time.Now()
-	n, err := writer.Write([]byte("test"))
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if n != 4 {
-		t.Fatalf("bad: %v", n)
-	}
-
-	select {
-	case b := <-writer.BufCh:
-		if len(b) != 4 {
-			t.Fatalf("Bad: %v", b)
-		}
-		if time.Now().Sub(start) < writer.BufIdle {
-			t.Fatalf("too early")
-		}
-	case <-time.After(2 * writer.BufIdle):
-		t.Fatalf("timeout")
-	}
-
-	// Write in succession to prevent the timeout
-	writer.Write([]byte("test"))
-	time.Sleep(writer.BufIdle / 2)
-	writer.Write([]byte("test"))
-	time.Sleep(writer.BufIdle / 2)
-	start = time.Now()
-	writer.Write([]byte("test"))
-
-	select {
-	case b := <-writer.BufCh:
-		if len(b) != 12 {
-			t.Fatalf("Bad: %v", b)
-		}
-		if time.Now().Sub(start) < writer.BufIdle {
-			t.Fatalf("too early")
-		}
-	case <-time.After(2 * writer.BufIdle):
-		t.Fatalf("timeout")
-	}
-
-	// Write large values, multiple flushes required
-	writer.Write([]byte("01234567890123456789012345678901"))
-
-	select {
-	case b := <-writer.BufCh:
-		if string(b) != "0123456789012345" {
-			t.Fatalf("bad: %s", b)
-		}
-	default:
-		t.Fatalf("should have buf")
-	}
-	select {
-	case b := <-writer.BufCh:
-		if string(b) != "6789012345678901" {
-			t.Fatalf("bad: %s", b)
-		}
-	default:
-		t.Fatalf("should have buf")
-	}
-}
-
-func TestRemoteExecGetSpec(t *testing.T) {
-	t.Parallel()
-	testRemoteExecGetSpec(t, nil, "", true)
-}
-
-func TestRemoteExecGetSpec_ACLToken(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDatacenter = "dc1"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLToken = "root"
-	cfg.ACLDefaultPolicy = "deny"
-	testRemoteExecGetSpec(t, cfg, "root", true)
-}
-
-func TestRemoteExecGetSpec_ACLAgentToken(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDatacenter = "dc1"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLAgentToken = "root"
-	cfg.ACLDefaultPolicy = "deny"
-	testRemoteExecGetSpec(t, cfg, "root", true)
-}
-
-func TestRemoteExecGetSpec_ACLDeny(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDatacenter = "dc1"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLDefaultPolicy = "deny"
-	testRemoteExecGetSpec(t, cfg, "root", false)
-}
-
-func testRemoteExecGetSpec(t *testing.T, c *Config, token string, shouldSucceed bool) {
-	a := NewTestAgent(t.Name(), c)
-	defer a.Shutdown()
-
-	event := &remoteExecEvent{
-		Prefix:  "_rexec",
-		Session: makeRexecSession(t, a.Agent, token),
-	}
-	defer destroySession(t, a.Agent, event.Session, token)
-
-	spec := &remoteExecSpec{
-		Command: "uptime",
-		Script:  []byte("#!/bin/bash"),
-		Wait:    time.Second,
-	}
-	buf, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	key := "_rexec/" + event.Session + "/job"
-	setKV(t, a.Agent, key, buf, token)
-
-	var out remoteExecSpec
-	if shouldSucceed != a.remoteExecGetSpec(event, &out) {
-		t.Fatalf("bad")
-	}
-	if shouldSucceed && !reflect.DeepEqual(spec, &out) {
-		t.Fatalf("bad spec")
-	}
-}
-
-func TestRemoteExecWrites(t *testing.T) {
-	t.Parallel()
-	testRemoteExecWrites(t, nil, "", true)
-}
-
-func TestRemoteExecWrites_ACLToken(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDatacenter = "dc1"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLToken = "root"
-	cfg.ACLDefaultPolicy = "deny"
-	testRemoteExecWrites(t, cfg, "root", true)
-}
-
-func TestRemoteExecWrites_ACLAgentToken(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDatacenter = "dc1"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLAgentToken = "root"
-	cfg.ACLDefaultPolicy = "deny"
-	testRemoteExecWrites(t, cfg, "root", true)
-}
-
-func TestRemoteExecWrites_ACLDeny(t *testing.T) {
-	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDatacenter = "dc1"
-	cfg.ACLMasterToken = "root"
-	cfg.ACLDefaultPolicy = "deny"
-	testRemoteExecWrites(t, cfg, "root", false)
-}
-
-func testRemoteExecWrites(t *testing.T, c *Config, token string, shouldSucceed bool) {
-	a := NewTestAgent(t.Name(), c)
-	defer a.Shutdown()
-
-	event := &remoteExecEvent{
-		Prefix:  "_rexec",
-		Session: makeRexecSession(t, a.Agent, token),
-	}
-	defer destroySession(t, a.Agent, event.Session, token)
-
-	if shouldSucceed != a.remoteExecWriteAck(event) {
-		t.Fatalf("bad")
-	}
-
-	output := []byte("testing")
-	if shouldSucceed != a.remoteExecWriteOutput(event, 0, output) {
-		t.Fatalf("bad")
-	}
-	if shouldSucceed != a.remoteExecWriteOutput(event, 10, output) {
-		t.Fatalf("bad")
-	}
-
-	// Bypass the remaining checks if the write was expected to fail.
-	if !shouldSucceed {
-		return
-	}
-
-	exitCode := 1
-	if !a.remoteExecWriteExitCode(event, &exitCode) {
-		t.Fatalf("bad")
-	}
-
-	key := "_rexec/" + event.Session + "/" + a.Config.NodeName + "/ack"
-	d := getKV(t, a.Agent, key, token)
-	if d == nil || d.Session != event.Session {
-		t.Fatalf("bad ack: %#v", d)
-	}
-
-	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/out/00000"
-	d = getKV(t, a.Agent, key, token)
-	if d == nil || d.Session != event.Session || !bytes.Equal(d.Value, output) {
-		t.Fatalf("bad output: %#v", d)
-	}
-
-	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/out/0000a"
-	d = getKV(t, a.Agent, key, token)
-	if d == nil || d.Session != event.Session || !bytes.Equal(d.Value, output) {
-		t.Fatalf("bad output: %#v", d)
-	}
-
-	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/exit"
-	d = getKV(t, a.Agent, key, token)
-	if d == nil || d.Session != event.Session || string(d.Value) != "1" {
-		t.Fatalf("bad output: %#v", d)
-	}
-}
-
-func testHandleRemoteExec(t *testing.T, command string, expectedSubstring string, expectedReturnCode string) {
-	a := NewTestAgent(t.Name(), nil)
-	defer a.Shutdown()
-
-	event := &remoteExecEvent{
-		Prefix:  "_rexec",
-		Session: makeRexecSession(t, a.Agent, ""),
-	}
-	defer destroySession(t, a.Agent, event.Session, "")
-
-	spec := &remoteExecSpec{
-		Command: command,
-		Wait:    time.Second,
-	}
-	buf, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	key := "_rexec/" + event.Session + "/job"
-	setKV(t, a.Agent, key, buf, "")
-
-	buf, err = json.Marshal(event)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	msg := &UserEvent{
-		ID:      generateUUID(),
-		Payload: buf,
-	}
-
-	// Handle the event...
-	a.handleRemoteExec(msg)
-
-	// Verify we have an ack
-	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/ack"
-	d := getKV(t, a.Agent, key, "")
-	if d == nil || d.Session != event.Session {
-		t.Fatalf("bad ack: %#v", d)
-	}
-
-	// Verify we have output
-	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/out/00000"
-	d = getKV(t, a.Agent, key, "")
-	if d == nil || d.Session != event.Session ||
-		!bytes.Contains(d.Value, []byte(expectedSubstring)) {
-		t.Fatalf("bad output: %#v", d)
-	}
-
-	// Verify we have an exit code
-	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/exit"
-	d = getKV(t, a.Agent, key, "")
-	if d == nil || d.Session != event.Session || string(d.Value) != expectedReturnCode {
-		t.Fatalf("bad output: %#v", d)
-	}
-}
-
-func TestHandleRemoteExec(t *testing.T) {
-	t.Parallel()
-	testHandleRemoteExec(t, "uptime", "load", "0")
-}
-
-func TestHandleRemoteExecFailed(t *testing.T) {
-	t.Parallel()
-	testHandleRemoteExec(t, "echo failing;exit 2", "failing", "2")
-}
-
-func makeRexecSession(t *testing.T, a *Agent, token string) string {
-	args := structs.SessionRequest{
-		Datacenter: a.config.Datacenter,
-		Op:         structs.SessionCreate,
-		Session: structs.Session{
-			Node:      a.config.NodeName,
-			LockDelay: 15 * time.Second,
-		},
-		WriteRequest: structs.WriteRequest{
-			Token: token,
-		},
-	}
-	var out string
-	if err := a.RPC("Session.Apply", &args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	return out
-}
-
-func destroySession(t *testing.T, a *Agent, session string, token string) {
-	args := structs.SessionRequest{
-		Datacenter: a.config.Datacenter,
-		Op:         structs.SessionDestroy,
-		Session: structs.Session{
-			ID: session,
-		},
-		WriteRequest: structs.WriteRequest{
-			Token: token,
-		},
-	}
-	var out string
-	if err := a.RPC("Session.Apply", &args, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-}
-
-func setKV(t *testing.T, a *Agent, key string, val []byte, token string) {
-	write := structs.KVSRequest{
-		Datacenter: a.config.Datacenter,
-		Op:         api.KVSet,
-		DirEnt: structs.DirEntry{
-			Key:   key,
-			Value: val,
-		},
-		WriteRequest: structs.WriteRequest{
-			Token: token,
-		},
-	}
-	var success bool
-	if err := a.RPC("KVS.Apply", &write, &success); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-}
-
-func getKV(t *testing.T, a *Agent, key string, token string) *structs.DirEntry {
-	req := structs.KeyRequest{
-		Datacenter: a.config.Datacenter,
-		Key:        key,
-		QueryOptions: structs.QueryOptions{
-			Token: token,
-		},
-	}
-	var out structs.IndexedDirEntries
-	if err := a.RPC("KVS.Get", &req, &out); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if len(out.Entries) > 0 {
-		return out.Entries[0]
-	}
-	return nil
-}
+// todo(fs): func TestRexecWriter(t *testing.T) {
+// todo(fs): 	// t.Parallel() // timing test. no parallel
+// todo(fs): 	writer := &rexecWriter{
+// todo(fs): 		BufCh:    make(chan []byte, 16),
+// todo(fs): 		BufSize:  16,
+// todo(fs): 		BufIdle:  100 * time.Millisecond,
+// todo(fs): 		CancelCh: make(chan struct{}),
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Write short, wait for idle
+// todo(fs): 	start := time.Now()
+// todo(fs): 	n, err := writer.Write([]byte("test"))
+// todo(fs): 	if err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	if n != 4 {
+// todo(fs): 		t.Fatalf("bad: %v", n)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	select {
+// todo(fs): 	case b := <-writer.BufCh:
+// todo(fs): 		if len(b) != 4 {
+// todo(fs): 			t.Fatalf("Bad: %v", b)
+// todo(fs): 		}
+// todo(fs): 		if time.Now().Sub(start) < writer.BufIdle {
+// todo(fs): 			t.Fatalf("too early")
+// todo(fs): 		}
+// todo(fs): 	case <-time.After(2 * writer.BufIdle):
+// todo(fs): 		t.Fatalf("timeout")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Write in succession to prevent the timeout
+// todo(fs): 	writer.Write([]byte("test"))
+// todo(fs): 	time.Sleep(writer.BufIdle / 2)
+// todo(fs): 	writer.Write([]byte("test"))
+// todo(fs): 	time.Sleep(writer.BufIdle / 2)
+// todo(fs): 	start = time.Now()
+// todo(fs): 	writer.Write([]byte("test"))
+// todo(fs):
+// todo(fs): 	select {
+// todo(fs): 	case b := <-writer.BufCh:
+// todo(fs): 		if len(b) != 12 {
+// todo(fs): 			t.Fatalf("Bad: %v", b)
+// todo(fs): 		}
+// todo(fs): 		if time.Now().Sub(start) < writer.BufIdle {
+// todo(fs): 			t.Fatalf("too early")
+// todo(fs): 		}
+// todo(fs): 	case <-time.After(2 * writer.BufIdle):
+// todo(fs): 		t.Fatalf("timeout")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Write large values, multiple flushes required
+// todo(fs): 	writer.Write([]byte("01234567890123456789012345678901"))
+// todo(fs):
+// todo(fs): 	select {
+// todo(fs): 	case b := <-writer.BufCh:
+// todo(fs): 		if string(b) != "0123456789012345" {
+// todo(fs): 			t.Fatalf("bad: %s", b)
+// todo(fs): 		}
+// todo(fs): 	default:
+// todo(fs): 		t.Fatalf("should have buf")
+// todo(fs): 	}
+// todo(fs): 	select {
+// todo(fs): 	case b := <-writer.BufCh:
+// todo(fs): 		if string(b) != "6789012345678901" {
+// todo(fs): 			t.Fatalf("bad: %s", b)
+// todo(fs): 		}
+// todo(fs): 	default:
+// todo(fs): 		t.Fatalf("should have buf")
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestRemoteExecGetSpec(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	testRemoteExecGetSpec(t, nil, "", true)
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestRemoteExecGetSpec_ACLToken(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.ACLDatacenter = "dc1"
+// todo(fs): 	cfg.ACLMasterToken = "root"
+// todo(fs): 	cfg.ACLToken = "root"
+// todo(fs): 	cfg.ACLDefaultPolicy = "deny"
+// todo(fs): 	testRemoteExecGetSpec(t, cfg, "root", true)
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestRemoteExecGetSpec_ACLAgentToken(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.ACLDatacenter = "dc1"
+// todo(fs): 	cfg.ACLMasterToken = "root"
+// todo(fs): 	cfg.ACLAgentToken = "root"
+// todo(fs): 	cfg.ACLDefaultPolicy = "deny"
+// todo(fs): 	testRemoteExecGetSpec(t, cfg, "root", true)
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestRemoteExecGetSpec_ACLDeny(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.ACLDatacenter = "dc1"
+// todo(fs): 	cfg.ACLMasterToken = "root"
+// todo(fs): 	cfg.ACLDefaultPolicy = "deny"
+// todo(fs): 	testRemoteExecGetSpec(t, cfg, "root", false)
+// todo(fs): }
+// todo(fs):
+// todo(fs): func testRemoteExecGetSpec(t *testing.T, c *config.RuntimeConfig, token string, shouldSucceed bool) {
+// todo(fs): 	a := NewTestAgent(t.Name(), c)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	event := &remoteExecEvent{
+// todo(fs): 		Prefix:  "_rexec",
+// todo(fs): 		Session: makeRexecSession(t, a.Agent, token),
+// todo(fs): 	}
+// todo(fs): 	defer destroySession(t, a.Agent, event.Session, token)
+// todo(fs):
+// todo(fs): 	spec := &remoteExecSpec{
+// todo(fs): 		Command: "uptime",
+// todo(fs): 		Script:  []byte("#!/bin/bash"),
+// todo(fs): 		Wait:    time.Second,
+// todo(fs): 	}
+// todo(fs): 	buf, err := json.Marshal(spec)
+// todo(fs): 	if err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	key := "_rexec/" + event.Session + "/job"
+// todo(fs): 	setKV(t, a.Agent, key, buf, token)
+// todo(fs):
+// todo(fs): 	var out remoteExecSpec
+// todo(fs): 	if shouldSucceed != a.remoteExecGetSpec(event, &out) {
+// todo(fs): 		t.Fatalf("bad")
+// todo(fs): 	}
+// todo(fs): 	if shouldSucceed && !reflect.DeepEqual(spec, &out) {
+// todo(fs): 		t.Fatalf("bad spec")
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestRemoteExecWrites(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	testRemoteExecWrites(t, nil, "", true)
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestRemoteExecWrites_ACLToken(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.ACLDatacenter = "dc1"
+// todo(fs): 	cfg.ACLMasterToken = "root"
+// todo(fs): 	cfg.ACLToken = "root"
+// todo(fs): 	cfg.ACLDefaultPolicy = "deny"
+// todo(fs): 	testRemoteExecWrites(t, cfg, "root", true)
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestRemoteExecWrites_ACLAgentToken(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.ACLDatacenter = "dc1"
+// todo(fs): 	cfg.ACLMasterToken = "root"
+// todo(fs): 	cfg.ACLAgentToken = "root"
+// todo(fs): 	cfg.ACLDefaultPolicy = "deny"
+// todo(fs): 	testRemoteExecWrites(t, cfg, "root", true)
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestRemoteExecWrites_ACLDeny(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	cfg := TestConfig()
+// todo(fs): 	cfg.ACLDatacenter = "dc1"
+// todo(fs): 	cfg.ACLMasterToken = "root"
+// todo(fs): 	cfg.ACLDefaultPolicy = "deny"
+// todo(fs): 	testRemoteExecWrites(t, cfg, "root", false)
+// todo(fs): }
+// todo(fs):
+// todo(fs): func testRemoteExecWrites(t *testing.T, c *config.RuntimeConfig, token string, shouldSucceed bool) {
+// todo(fs): 	a := NewTestAgent(t.Name(), c)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	event := &remoteExecEvent{
+// todo(fs): 		Prefix:  "_rexec",
+// todo(fs): 		Session: makeRexecSession(t, a.Agent, token),
+// todo(fs): 	}
+// todo(fs): 	defer destroySession(t, a.Agent, event.Session, token)
+// todo(fs):
+// todo(fs): 	if shouldSucceed != a.remoteExecWriteAck(event) {
+// todo(fs): 		t.Fatalf("bad")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	output := []byte("testing")
+// todo(fs): 	if shouldSucceed != a.remoteExecWriteOutput(event, 0, output) {
+// todo(fs): 		t.Fatalf("bad")
+// todo(fs): 	}
+// todo(fs): 	if shouldSucceed != a.remoteExecWriteOutput(event, 10, output) {
+// todo(fs): 		t.Fatalf("bad")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Bypass the remaining checks if the write was expected to fail.
+// todo(fs): 	if !shouldSucceed {
+// todo(fs): 		return
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	exitCode := 1
+// todo(fs): 	if !a.remoteExecWriteExitCode(event, &exitCode) {
+// todo(fs): 		t.Fatalf("bad")
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	key := "_rexec/" + event.Session + "/" + a.Config.NodeName + "/ack"
+// todo(fs): 	d := getKV(t, a.Agent, key, token)
+// todo(fs): 	if d == nil || d.Session != event.Session {
+// todo(fs): 		t.Fatalf("bad ack: %#v", d)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/out/00000"
+// todo(fs): 	d = getKV(t, a.Agent, key, token)
+// todo(fs): 	if d == nil || d.Session != event.Session || !bytes.Equal(d.Value, output) {
+// todo(fs): 		t.Fatalf("bad output: %#v", d)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/out/0000a"
+// todo(fs): 	d = getKV(t, a.Agent, key, token)
+// todo(fs): 	if d == nil || d.Session != event.Session || !bytes.Equal(d.Value, output) {
+// todo(fs): 		t.Fatalf("bad output: %#v", d)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/exit"
+// todo(fs): 	d = getKV(t, a.Agent, key, token)
+// todo(fs): 	if d == nil || d.Session != event.Session || string(d.Value) != "1" {
+// todo(fs): 		t.Fatalf("bad output: %#v", d)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func testHandleRemoteExec(t *testing.T, command string, expectedSubstring string, expectedReturnCode string) {
+// todo(fs): 	a := NewTestAgent(t.Name(), nil)
+// todo(fs): 	defer a.Shutdown()
+// todo(fs):
+// todo(fs): 	event := &remoteExecEvent{
+// todo(fs): 		Prefix:  "_rexec",
+// todo(fs): 		Session: makeRexecSession(t, a.Agent, ""),
+// todo(fs): 	}
+// todo(fs): 	defer destroySession(t, a.Agent, event.Session, "")
+// todo(fs):
+// todo(fs): 	spec := &remoteExecSpec{
+// todo(fs): 		Command: command,
+// todo(fs): 		Wait:    time.Second,
+// todo(fs): 	}
+// todo(fs): 	buf, err := json.Marshal(spec)
+// todo(fs): 	if err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	key := "_rexec/" + event.Session + "/job"
+// todo(fs): 	setKV(t, a.Agent, key, buf, "")
+// todo(fs):
+// todo(fs): 	buf, err = json.Marshal(event)
+// todo(fs): 	if err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	msg := &UserEvent{
+// todo(fs): 		ID:      generateUUID(),
+// todo(fs): 		Payload: buf,
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Handle the event...
+// todo(fs): 	a.handleRemoteExec(msg)
+// todo(fs):
+// todo(fs): 	// Verify we have an ack
+// todo(fs): 	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/ack"
+// todo(fs): 	d := getKV(t, a.Agent, key, "")
+// todo(fs): 	if d == nil || d.Session != event.Session {
+// todo(fs): 		t.Fatalf("bad ack: %#v", d)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Verify we have output
+// todo(fs): 	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/out/00000"
+// todo(fs): 	d = getKV(t, a.Agent, key, "")
+// todo(fs): 	if d == nil || d.Session != event.Session ||
+// todo(fs): 		!bytes.Contains(d.Value, []byte(expectedSubstring)) {
+// todo(fs): 		t.Fatalf("bad output: %#v", d)
+// todo(fs): 	}
+// todo(fs):
+// todo(fs): 	// Verify we have an exit code
+// todo(fs): 	key = "_rexec/" + event.Session + "/" + a.Config.NodeName + "/exit"
+// todo(fs): 	d = getKV(t, a.Agent, key, "")
+// todo(fs): 	if d == nil || d.Session != event.Session || string(d.Value) != expectedReturnCode {
+// todo(fs): 		t.Fatalf("bad output: %#v", d)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestHandleRemoteExec(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	testHandleRemoteExec(t, "uptime", "load", "0")
+// todo(fs): }
+// todo(fs):
+// todo(fs): func TestHandleRemoteExecFailed(t *testing.T) {
+// todo(fs): 	t.Parallel()
+// todo(fs): 	testHandleRemoteExec(t, "echo failing;exit 2", "failing", "2")
+// todo(fs): }
+// todo(fs):
+// todo(fs): func makeRexecSession(t *testing.T, a *Agent, token string) string {
+// todo(fs): 	args := structs.SessionRequest{
+// todo(fs): 		Datacenter: a.config.Datacenter,
+// todo(fs): 		Op:         structs.SessionCreate,
+// todo(fs): 		Session: structs.Session{
+// todo(fs): 			Node:      a.config.NodeName,
+// todo(fs): 			LockDelay: 15 * time.Second,
+// todo(fs): 		},
+// todo(fs): 		WriteRequest: structs.WriteRequest{
+// todo(fs): 			Token: token,
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	var out string
+// todo(fs): 	if err := a.RPC("Session.Apply", &args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	return out
+// todo(fs): }
+// todo(fs):
+// todo(fs): func destroySession(t *testing.T, a *Agent, session string, token string) {
+// todo(fs): 	args := structs.SessionRequest{
+// todo(fs): 		Datacenter: a.config.Datacenter,
+// todo(fs): 		Op:         structs.SessionDestroy,
+// todo(fs): 		Session: structs.Session{
+// todo(fs): 			ID: session,
+// todo(fs): 		},
+// todo(fs): 		WriteRequest: structs.WriteRequest{
+// todo(fs): 			Token: token,
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	var out string
+// todo(fs): 	if err := a.RPC("Session.Apply", &args, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func setKV(t *testing.T, a *Agent, key string, val []byte, token string) {
+// todo(fs): 	write := structs.KVSRequest{
+// todo(fs): 		Datacenter: a.config.Datacenter,
+// todo(fs): 		Op:         api.KVSet,
+// todo(fs): 		DirEnt: structs.DirEntry{
+// todo(fs): 			Key:   key,
+// todo(fs): 			Value: val,
+// todo(fs): 		},
+// todo(fs): 		WriteRequest: structs.WriteRequest{
+// todo(fs): 			Token: token,
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	var success bool
+// todo(fs): 	if err := a.RPC("KVS.Apply", &write, &success); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): }
+// todo(fs):
+// todo(fs): func getKV(t *testing.T, a *Agent, key string, token string) *structs.DirEntry {
+// todo(fs): 	req := structs.KeyRequest{
+// todo(fs): 		Datacenter: a.config.Datacenter,
+// todo(fs): 		Key:        key,
+// todo(fs): 		QueryOptions: structs.QueryOptions{
+// todo(fs): 			Token: token,
+// todo(fs): 		},
+// todo(fs): 	}
+// todo(fs): 	var out structs.IndexedDirEntries
+// todo(fs): 	if err := a.RPC("KVS.Get", &req, &out); err != nil {
+// todo(fs): 		t.Fatalf("err: %v", err)
+// todo(fs): 	}
+// todo(fs): 	if len(out.Entries) > 0 {
+// todo(fs): 		return out.Entries[0]
+// todo(fs): 	}
+// todo(fs): 	return nil
+// todo(fs): }
