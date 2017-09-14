@@ -2,7 +2,9 @@ package config
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"reflect"
@@ -23,44 +25,21 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// todo(fs): port SetupTaggedAndAdvertiseAddrs
-// todo(fs): support dev config
-
-func NewRuntimeConfig(c ...Config) (RuntimeConfig, []string, error) {
-	b := &Builder{
-		Configs:        c,
-		DefaultRuntime: NonUserConfig,
-	}
-	rt, err := b.BuildAndValidate()
-	return rt, b.Warnings, err
-}
-
-func mustRuntimeConfig(name string, c Config) RuntimeConfig {
-	rt, warns, err := NewRuntimeConfig(c)
-	if err != nil {
-		panic(fmt.Sprintf("Error creating %s: %s", name, err))
-	}
-	if len(warns) != 0 {
-		panic(fmt.Sprintf("Warning creating %s: %s", name, strings.Join(warns, "\n")))
-	}
-	return rt
-}
-
 // Builder constructs a valid runtime configuration from multiple
-// configuration fragments.
+// configuration sources.
 //
 // To build the runtime configuration first call Build() which merges
-// the fragments in a pre-defined order, converts the data types and
+// the sources in a pre-defined order, converts the data types and
 // structures into their final form and performs the syntactic
 // validation.
 //
-// The fragments are merged in the following order:
+// The sources are merged in the following order:
 //
 //  * default configuration
 //  * config files in alphabetical order
 //  * command line arguments
 //
-// The config fragments are merged sequentially and later values
+// The config sources are merged sequentially and later values
 // overwrite previously set values. Slice values are merged by
 // concatenating the two slices.
 //
@@ -74,27 +53,9 @@ type Builder struct {
 	// Flags contains the parsed command line arguments.
 	Flags Flags
 
-	// Default contains the default configuration. When set to nil , the
-	// default configuration depends on the value of the Flags.DevMode
-	// flag.
-	Default *Config
-
-	// DefaultRuntime contains the default configuration of the non-user
-	// configurable values.
-	DefaultRuntime RuntimeConfig
-
-	// Revision contains the git commit hash.
-	Revision string
-
-	// Version contains the version number.
-	Version string
-
-	// VersionPrerelease contains the version suffix.
-	VersionPrerelease string
-
-	// Configs contains the user configuration fragments in the order to
-	// be merged.
-	Configs []Config
+	Head    []Source
+	Sources []Source
+	Tail    []Source
 
 	// Warnings contains the warnigns encountered when
 	// parsing the configuration.
@@ -119,7 +80,7 @@ type Builder struct {
 
 // ReadPath reads a single config file or all files in a directory (but
 // not its sub-directories) and appends them to the list of config
-// fragments. If path refers to a file then the format is assumed to be
+// sources. If path refers to a file then the format is assumed to be
 // JSON unless the file has a '.hcl' suffix. If path refers to a
 // directory then the format is determined by the suffix and only files
 // with a '.json' or '.hcl' suffix are processed.
@@ -136,7 +97,7 @@ func (b *Builder) ReadPath(path string) error {
 	}
 
 	if !fi.IsDir() {
-		return b.readFile(fi.Name())
+		return b.ReadFile(fi.Name())
 	}
 
 	fis, err := f.Readdir(-1)
@@ -158,21 +119,21 @@ func (b *Builder) ReadPath(path string) error {
 			continue
 		}
 
-		if err := b.readFile(fi.Name()); err != nil {
+		if err := b.ReadFile(fi.Name()); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// readFile parses a JSON or HCL config file and appends it to the list of
-// config fragments.
-func (b *Builder) readFile(name string) error {
-	c, err := ParseFile(name)
+// ReadFile parses a JSON or HCL config file and appends it to the list of
+// config sources.
+func (b *Builder) ReadFile(name string) error {
+	data, err := ioutil.ReadFile(name)
 	if err != nil {
-		return fmt.Errorf("config: Error parsing %s: %s", name, err)
+		return fmt.Errorf("config: Error reading %s: %s", name, err)
 	}
-	b.Configs = append(b.Configs, c)
+	b.Sources = append(b.Sources, NewSource(name, string(data)))
 	return nil
 }
 
@@ -213,10 +174,10 @@ func singlePublicIPv6() (*net.IPAddr, error) {
 	return &net.IPAddr{IP: ip}, nil
 }
 
-// Build constructs the runtime configuration from the config fragments
-// and the command line flags. The config fragments are processed in the
+// Build constructs the runtime configuration from the config sources
+// and the command line flags. The config sources are processed in the
 // order they were added with the flags being processed last to give
-// precedence over the other fragments. If the error is nil then
+// precedence over the other sources. If the error is nil then
 // warnings can still contain deprecation or format warnigns that should
 // be presented to the user.
 func (b *Builder) Build() (rt RuntimeConfig, err error) {
@@ -247,7 +208,7 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	}
 
 	// ----------------------------------------------------------------
-	// merge config fragments as follows
+	// merge config sources as follows
 	//
 	//   default, files in alphabetical order, flags
 	//
@@ -257,21 +218,43 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	// merge the config files since the flag values for slices are
 	// otherwise appended instead of prepended.
 
-	var cfgs []Config
-	if b.Default == nil {
-		if b.boolVal(b.Flags.DevMode) {
-			b.Default = DevConfig()
-		} else {
-			b.Default = &defaultConfig
+	toJson := func(name string, v interface{}) Source {
+		b, err := json.MarshalIndent(v, "", "    ")
+		if err != nil {
+			panic(err)
 		}
+		return Source{Name: name, Format: "json", Data: string(b)}
 	}
-	cfgs = append(cfgs, *b.Default)
+
+	// build the list of config sources
+	var srcs []Source
+	if len(b.Head) == 0 {
+		srcs = append(srcs, DefaultSource)
+	}
+	srcs = append(srcs, b.Head...)
+	if b.boolVal(b.Flags.DevMode) {
+		srcs = append(srcs, DevSource)
+	}
 
 	flagSlices, flagValues := b.splitSlicesAndValues(b.Flags.Config)
-	cfgs = append(cfgs, flagSlices)
-	cfgs = append(cfgs, b.Configs...)
-	cfgs = append(cfgs, flagValues)
-	c := Merge(cfgs)
+	srcs = append(srcs, toJson("flags.slices", flagSlices))
+	srcs = append(srcs, b.Sources...)
+	srcs = append(srcs, toJson("flags.values", flagValues))
+	srcs = append(srcs, b.Tail...)
+
+	// parse the config sources into a configuration
+	var c Config
+	for _, s := range srcs {
+		if s.Name == "" {
+			continue
+		}
+		// fmt.Println("Merging", s.Name)
+		c2, err := Parse(s.Data, s.Format)
+		if err != nil {
+			return RuntimeConfig{}, fmt.Errorf("Error parsing %s: %s", s.Name, err)
+		}
+		c = Merge(c, c2)
+	}
 
 	// ----------------------------------------------------------------
 	// process/merge some complex values
@@ -625,16 +608,15 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	//
 	rt = RuntimeConfig{
 		// non-user configurable values
-		ACLDisabledTTL:             b.DefaultRuntime.ACLDisabledTTL,
-		AEInterval:                 b.DefaultRuntime.AEInterval,
-		CheckDeregisterIntervalMin: b.DefaultRuntime.CheckDeregisterIntervalMin,
-		CheckReapInterval:          b.DefaultRuntime.CheckReapInterval,
-		SyncCoordinateIntervalMin:  b.DefaultRuntime.SyncCoordinateIntervalMin,
-		SyncCoordinateRateTarget:   b.DefaultRuntime.SyncCoordinateRateTarget,
-
-		Revision:          b.Revision,
-		Version:           b.Version,
-		VersionPrerelease: b.VersionPrerelease,
+		ACLDisabledTTL:             b.durationVal(c.ACLDisabledTTL),
+		AEInterval:                 b.durationVal(c.AEInterval),
+		CheckDeregisterIntervalMin: b.durationVal(c.CheckDeregisterIntervalMin),
+		CheckReapInterval:          b.durationVal(c.CheckReapInterval),
+		Revision:                   b.stringVal(c.Revision),
+		SyncCoordinateIntervalMin:  b.durationVal(c.SyncCoordinateIntervalMin),
+		SyncCoordinateRateTarget:   b.float64Val(c.SyncCoordinateRateTarget),
+		Version:                    b.stringVal(c.Version),
+		VersionPrerelease:          b.stringVal(c.VersionPrerelease),
 
 		// ACL
 		ACLAgentMasterToken:  b.stringVal(c.ACLAgentMasterToken),

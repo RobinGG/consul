@@ -13,7 +13,7 @@ import (
 // * when merging two slices the result is the second slice appended to the first
 // * when merging two maps the result is the second map if it is not empty, otherwise the first
 // * when merging two pointer values the result is the second value if it is not nil, otherwise the first
-func Merge(files []Config) Config {
+func Merge(files ...Config) Config {
 	var a Config
 	for _, b := range files {
 		a = merge(a, b).(Config)

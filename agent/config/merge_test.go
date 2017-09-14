@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/pascaldekloe/goe/verify"
 )
@@ -41,10 +42,16 @@ func TestMerge(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.desc, func(t *testing.T) {
-			got, want := Merge(tt.cfgs), tt.want
+			got, want := Merge(tt.cfgs...), tt.want
 			if !verify.Values(t, "", got, want) {
 				t.FailNow()
 			}
 		})
 	}
 }
+
+func pBool(v bool) *bool                { return &v }
+func pInt(v int) *int                   { return &v }
+func pString(v string) *string          { return &v }
+func pDuration(v time.Duration) *string { s := v.String(); return &s }
+func pFloat64(v float64) *float64       { return &v }

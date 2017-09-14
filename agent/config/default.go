@@ -1,89 +1,120 @@
 package config
 
 import (
+	"fmt"
 	"time"
 
-	"math"
-
 	"github.com/hashicorp/consul/agent/consul"
+	"github.com/hashicorp/consul/version"
 )
 
-func pBool(v bool) *bool                { return &v }
-func pInt(v int) *int                   { return &v }
-func pString(v string) *string          { return &v }
-func pDuration(v time.Duration) *string { s := v.String(); return &s }
-func pFloat64(v float64) *float64       { return &v }
+// DefaultSource is the default agent configuration.
+var DefaultSource = Source{
+	Name:   "default",
+	Format: "hcl",
+	Data: `
+		acl_default_policy = "allow"
+		acl_down_policy = "extend-cache"
+		acl_enforce_version8 = true
+		acl_ttl = "30s"
+		bind_addr = "0.0.0.0"
+		bootstrap = false
+		bootstrap_expect = 0
+		check_update_interval = "5m"
+		client_addr = "127.0.0.1"
+		datacenter = "dc1"
+		disable_coordinates = false
+		disable_host_node_id = true
+		disable_remote_exec = true
+		domain = "consul."
+		encrypt_verify_incoming = true
+		encrypt_verify_outgoing = true
+		log_level = "INFO"
+		protocol =  2
+		retry_interval = "30s"
+		retry_interval_wan = "30s"
+		server = false
+		syslog_facility = "LOCAL0"
+		tls_min_version = "tls10"
 
-// defaultConfig is the default configuration file.
-var defaultConfig = Config{
-	Bootstrap:       pBool(false),
-	BootstrapExpect: pInt(0),
-	ServerMode:      pBool(false),
-	Datacenter:      pString("dc1"),
-	DNSDomain:       pString("consul."),
-	LogLevel:        pString("INFO"),
-	ClientAddr:      pString("127.0.0.1"),
-	BindAddr:        pString("0.0.0.0"),
-	Ports: Ports{
-		DNS:     pInt(8600),
-		HTTP:    pInt(8500),
-		HTTPS:   pInt(-1),
-		SerfLAN: pInt(8301),
-		SerfWAN: pInt(8302),
-		Server:  pInt(8300),
-	},
-	DNS: DNS{
-		AllowStale:      pBool(true),
-		UDPAnswerLimit:  pInt(3),
-		MaxStale:        pDuration(10 * 365 * 24 * time.Hour),
-		RecursorTimeout: pDuration(2 * time.Second),
-	},
-	Telemetry: Telemetry{
-		StatsitePrefix: pString("consul"),
-		FilterDefault:  pBool(true),
-	},
-	SyslogFacility:      pString("LOCAL0"),
-	RPCProtocol:         pInt(consul.ProtocolVersion2Compatible),
-	CheckUpdateInterval: pDuration(5 * time.Minute),
-	DisableCoordinates:  pBool(false),
-
-	ACLTTL:               pDuration(30 * time.Second),
-	ACLDownPolicy:        pString("extend-cache"),
-	ACLDefaultPolicy:     pString("allow"),
-	ACLEnforceVersion8:   pBool(true),
-	DisableRemoteExec:    pBool(true),
-	RetryJoinIntervalLAN: pDuration(30 * time.Second),
-	RetryJoinIntervalWAN: pDuration(30 * time.Second),
-
-	TLSMinVersion: pString("tls10"),
-
-	EncryptVerifyIncoming: pBool(true),
-	EncryptVerifyOutgoing: pBool(true),
-
-	DisableHostNodeID: pBool(true),
-	Limits: Limits{
-		RPCRate:     pFloat64(math.MaxFloat64),
-		RPCMaxBurst: pInt(1000),
-	},
+		dns_config = {
+			allow_stale = true
+			udp_answer_limit = 3
+			max_stale = "87600h"
+			recursor_timeout = "2s"
+		}
+		limits = {
+			rpc_rate = -1
+			rpc_max_burst = 1000
+		}
+		ports = {
+			dns = 8600
+			http = 8500
+			https = -1
+			serf_lan = 8301
+			serf_wan = 8302
+			server = 8300
+		}
+		telemetry = {
+			statsite_prefix = "consul"
+			filter_default = true
+		}
+	`,
 }
 
-func DefaultConfig() *RuntimeConfig {
-	rt, _, _ := NewRuntimeConfig(defaultConfig)
+// DevSource is the additional default configuration for dev mode.
+// This should be loaded after the default configuration.
+var DevSource = Source{
+	Name:   "dev",
+	Format: "hcl",
+	Data: `
+		bind_addr = "127.0.0.1"
+		disable_anonymous_signature = true
+		disable_keyring_file = true
+		enable_debug = true
+		enable_ui = true
+		log_level = "DEBUG"
+		server = true
+	`,
+}
+
+// NonUserSource contains the values the user cannot configure.
+// This needs to be merged last.
+var NonUserSource = Source{
+	Name:   "non-user",
+	Format: "hcl",
+	Data: `
+		acl_disabled_ttl = "120s"
+		check_deregister_interval_min = "1m"
+		check_reap_interval = "30s"
+		ae_interval = "1m"
+		sync_coordinate_rate_target = 64
+		sync_coordinate_interval_min = "15s"
+	`,
+}
+
+// VersionSource creates a config source for the version parameters.
+func VersionSource(rev, ver, verPre string) Source {
+	return Source{
+		Name:   "version",
+		Format: "hcl",
+		Data:   fmt.Sprintf(`revision = %q version = %q version_prerelease = %q`, rev, ver, verPre),
+	}
+}
+
+// DefaultVersionSource returns the version config source for the embedded
+// version numbers.
+func DefaultVersionSource() Source {
+	return VersionSource(version.GitCommit, version.Version, version.VersionPrerelease)
+}
+
+func DefaultRuntimeConfig() *RuntimeConfig {
+	b := &Builder{
+		Head: []Source{DefaultSource},
+		Tail: []Source{NonUserSource, DefaultVersionSource()},
+	}
+	rt, _ := b.BuildAndValidate()
 	return &rt
-}
-
-func DevConfig() *Config {
-	conf := defaultConfig
-
-	conf.LogLevel = pString("DEBUG")
-	conf.ServerMode = pBool(true)
-	conf.EnableDebug = pBool(true)
-	conf.DisableAnonymousSignature = pBool(true)
-	conf.EnableUI = pBool(true)
-	conf.BindAddr = pString("127.0.0.1")
-	conf.DisableKeyringFile = pBool(true)
-
-	return &conf
 }
 
 func devConsulConfig(conf *consul.Config) *consul.Config {
@@ -103,20 +134,4 @@ func devConsulConfig(conf *consul.Config) *consul.Config {
 	conf.CoordinateUpdatePeriod = 100 * time.Millisecond
 
 	return conf
-}
-
-// NonUserConfig contains the default values of the runtime configuration
-// which cannot be configured through the config file.
-var NonUserConfig = RuntimeConfig{
-	ACLDisabledTTL:             120 * time.Second,
-	CheckDeregisterIntervalMin: 1 * time.Minute,
-	CheckReapInterval:          30 * time.Second,
-	AEInterval:                 1 * time.Minute,
-
-	// SyncCoordinateRateTarget is set based on the rate that we want
-	// the server to handle as an aggregate across the entire cluster.
-	// If you update this, you'll need to adjust CoordinateUpdate* in
-	// the server-side config accordingly.
-	SyncCoordinateRateTarget:  64.0, // updates / second
-	SyncCoordinateIntervalMin: 15 * time.Second,
 }

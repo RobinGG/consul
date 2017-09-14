@@ -224,7 +224,25 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 			desc:  "-dev",
 			flags: []string{`-dev`},
 			patch: func(rt *RuntimeConfig) {
+				rt.AdvertiseAddrLAN = tcpAddr("127.0.0.1:8300")
+				rt.AdvertiseAddrWAN = tcpAddr("127.0.0.1:8300")
+				rt.BindAddr = ipAddr("127.0.0.1")
 				rt.DevMode = true
+				rt.DisableAnonymousSignature = true
+				rt.DisableKeyringFile = true
+				rt.EnableDebug = true
+				rt.EnableUI = true
+				rt.LeaveOnTerm = false
+				rt.LogLevel = "DEBUG"
+				rt.RPCAdvertiseAddr = tcpAddr("127.0.0.1:8300")
+				rt.RPCBindAddr = tcpAddr("127.0.0.1:8300")
+				rt.SerfAdvertiseAddrLAN = tcpAddr("127.0.0.1:8301")
+				rt.SerfAdvertiseAddrWAN = tcpAddr("127.0.0.1:8302")
+				rt.SerfBindAddrLAN = tcpAddr("127.0.0.1:8301")
+				rt.SerfBindAddrWAN = tcpAddr("127.0.0.1:8302")
+				rt.ServerMode = true
+				rt.SkipLeaveOnInt = true
+				rt.TaggedAddresses = map[string]string{"lan": "127.0.0.1", "wan": "127.0.0.1"}
 				rt.ConsulConfig = devConsulConfig(consul.DefaultConfig())
 			},
 		},
@@ -1390,25 +1408,29 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				}
 
 				// create the builder with the flags
-				defaultConfig.DataDir = pString("ddkErlg3")
 				b := &Builder{
-					Flags:       flags,
-					Default:     &defaultConfig,
+					Flags: flags,
+					Head: []Source{
+						DefaultSource,
+						Source{Name: "data-dir", Format: "hcl", Data: `data_dir = "h8smrzKF"`},
+					},
+					Tail: []Source{
+						NonUserSource,
+						VersionSource("abcdef", "0.9.0", "test"),
+					},
+
 					Hostname:    hostnameFn,
 					PrivateIPv4: func() (*net.IPAddr, error) { return ipAddr("10.0.0.1"), nil },
 					PublicIPv6:  func() (*net.IPAddr, error) { return ipAddr("2001:db8:1000"), nil },
 				}
-				if flags.DevMode != nil && *flags.DevMode {
-					b.Default = DevConfig()
-				}
 
 				// read the source fragements
-				for _, src := range srcs {
-					c, err := ParseConfig([]byte(src), format)
-					if err != nil {
-						t.Fatalf("ParseConfig failed for %q: %s", src, err)
-					}
-					b.Configs = append(b.Configs, c)
+				for i, data := range srcs {
+					b.Sources = append(b.Sources, Source{
+						Name:   fmt.Sprintf("%s-%d", format, i),
+						Format: format,
+						Data:   data,
+					})
 				}
 
 				// build/merge the config fragments
@@ -1430,7 +1452,8 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				// build the runtime config we expect
 				// from the same default config and patch it
 				x := &Builder{
-					Default:     b.Default,
+					Head:        b.Head,
+					Tail:        b.Tail,
 					Hostname:    b.Hostname,
 					PrivateIPv4: b.PrivateIPv4,
 					PublicIPv6:  b.PublicIPv6,
@@ -2316,21 +2339,39 @@ func TestFullConfig(t *testing.T) {
 			}]
 		`}
 
-	defaultRuntime := RuntimeConfig{
-		ACLDisabledTTL:             957 * time.Second,
-		CheckDeregisterIntervalMin: 27870 * time.Minute,
-		CheckReapInterval:          10662 * time.Second,
-		AEInterval:                 10003 * time.Minute,
-		SyncCoordinateRateTarget:   137.81,
-		SyncCoordinateIntervalMin:  27983 * time.Second,
+	nonUserSource := map[string]Source{
+		"json": Source{
+			Name:   "non-user.json",
+			Format: "json",
+			Data: `{
+				"acl_disabled_ttl": "957s",
+				"check_deregister_interval_min": "27870s",
+				"check_reap_interval": "10662s",
+				"ae_interval": "10003s",
+				"sync_coordinate_rate_target": 137.81,
+				"sync_coordinate_interval_min": "27983s"
+			}`,
+		},
+		"hcl": Source{
+			Name:   "non-user.hcl",
+			Format: "hcl",
+			Data: `
+				acl_disabled_ttl = "957s"
+				check_deregister_interval_min = "27870s"
+				check_reap_interval = "10662s"
+				ae_interval = "10003s"
+				sync_coordinate_rate_target = 137.81
+				sync_coordinate_interval_min = "27983s"
+		`,
+		},
 	}
 
 	want := RuntimeConfig{
 		// non-user configurable values
 		ACLDisabledTTL:             957 * time.Second,
-		CheckDeregisterIntervalMin: 27870 * time.Minute,
+		CheckDeregisterIntervalMin: 27870 * time.Second,
 		CheckReapInterval:          10662 * time.Second,
-		AEInterval:                 10003 * time.Minute,
+		AEInterval:                 10003 * time.Second,
 		SyncCoordinateRateTarget:   137.81,
 		SyncCoordinateIntervalMin:  27983 * time.Second,
 
@@ -2756,7 +2797,7 @@ func TestFullConfig(t *testing.T) {
 		t.Log(err)
 	}
 
-	for format, s := range src {
+	for format, data := range src {
 		t.Run(format, func(t *testing.T) {
 			// parse the flags since this is the only way we can set the
 			// DevMode flag
@@ -2767,25 +2808,19 @@ func TestFullConfig(t *testing.T) {
 				t.Fatalf("ParseFlags: %s", err)
 			}
 
-			// parse the config
-			c, err := ParseConfig([]byte(s), format)
-			if err != nil {
-				t.Fatalf("ParseConfig: %s", err)
-			}
-
 			// ensure that all fields are set to unique non-zero values
 			// if err := nonZero("Config", nil, c); err != nil {
 			// 	t.Fatal(err)
 			// }
 
 			b := &Builder{
-				Flags:             flags,
-				Default:           &defaultConfig,
-				DefaultRuntime:    defaultRuntime,
-				Revision:          "JNtPSav3",
-				Version:           "R909Hblt",
-				VersionPrerelease: "ZT1JOQLn",
-				Configs:           []Config{c},
+				Flags:   flags,
+				Head:    []Source{DefaultSource},
+				Sources: []Source{{Name: "full", Format: format, Data: data}},
+				Tail: []Source{
+					nonUserSource[format],
+					VersionSource("JNtPSav3", "R909Hblt", "ZT1JOQLn"),
+				},
 			}
 
 			// construct the runtime config
