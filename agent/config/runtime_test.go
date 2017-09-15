@@ -92,14 +92,14 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 	}
 
 	tests := []struct {
-		desc     string
-		flags    []string
-		json     []string
-		hcl      []string
-		patch    func(rt *RuntimeConfig)
-		err      string
-		warns    []string
-		hostname func() (string, error)
+		desc           string
+		flags          []string
+		json, jsontail []string
+		hcl, hcltail   []string
+		patch          func(rt *RuntimeConfig)
+		err            string
+		warns          []string
+		hostname       func() (string, error)
 	}{
 		// ------------------------------------------------------------
 		// cmd line flags
@@ -1054,7 +1054,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 						"advertise_addr": "a",
 						"advertise_addr_wan": "a",
 						"bootstrap":true,
-						"bootstrap_expect": 1,
+						"bootstrap_expect": 3,
 						"datacenter":"a",
 						"node_meta": {"a":"b"},
 						"recursors":["a", "b"],
@@ -1068,7 +1068,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 					advertise_addr = "a"
 					advertise_addr_wan = "a"
 					bootstrap = true
-					bootstrap_expect = 1
+					bootstrap_expect = 3
 					datacenter = "a"
 					node_meta = { "a" = "b" }
 					recursors = ["a", "b"]
@@ -1124,6 +1124,27 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 			patch: func(rt *RuntimeConfig) {
 				rt.ACLDatacenter = "a"
 			},
+		},
+		{
+			desc: "acl_replication_token enables acl replication",
+			json: []string{`{ "acl_replication_token": "a" }`},
+			hcl:  []string{`acl_replication_token = "a"`},
+			patch: func(rt *RuntimeConfig) {
+				rt.ACLReplicationToken = "a"
+				rt.EnableACLReplication = true
+			},
+		},
+		{
+			desc:     "ae_interval invalid == 0",
+			jsontail: []string{`{ "ae_interval": "0s" }`},
+			hcltail:  []string{`ae_interval = "0s"`},
+			err:      `ae_interval: must be positive: 0s`,
+		},
+		{
+			desc:     "ae_interval invalid < 0",
+			jsontail: []string{`{ "ae_interval": "-1s" }`},
+			hcltail:  []string{`ae_interval = "-1s"`},
+			err:      `ae_interval: must be positive: -1s`,
 		},
 		{
 			desc: "datacenter invalid",
@@ -1270,6 +1291,27 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 			err:   "dns_config.udp_answer_limit: must be positive: 0",
 		},
 		{
+			desc:  "performance.raft_multiplier < 0",
+			flags: []string{`-datacenter=a`},
+			json:  []string{`{ "performance": { "raft_multiplier": -1 } }`},
+			hcl:   []string{`performance = { raft_multiplier = -1 }`},
+			err:   `performance.raft_multiplier: value -1 not between 1 and 10`,
+		},
+		{
+			desc:  "performance.raft_multiplier == 0",
+			flags: []string{`-datacenter=a`},
+			json:  []string{`{ "performance": { "raft_multiplier": 0 } }`},
+			hcl:   []string{`performance = { raft_multiplier = 0 }`},
+			err:   `performance.raft_multiplier: value 0 not between 1 and 10`,
+		},
+		{
+			desc:  "performance.raft_multiplier > 10",
+			flags: []string{`-datacenter=a`},
+			json:  []string{`{ "performance": { "raft_multiplier": 20 } }`},
+			hcl:   []string{`performance = { raft_multiplier = 20 }`},
+			err:   `performance.raft_multiplier: value 20 not between 1 and 10`,
+		},
+		{
 			desc:     "node_name invalid",
 			flags:    []string{`-datacenter=a`},
 			hostname: func() (string, error) { return "", nil },
@@ -1378,9 +1420,9 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 			}
 
 			// select the source
-			srcs := tt.json
+			srcs, tails := tt.json, tt.jsontail
 			if format == "hcl" {
-				srcs = tt.hcl
+				srcs, tails = tt.hcl, tt.hcltail
 			}
 
 			// build the description
@@ -1425,6 +1467,13 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				// read the source fragements
 				for i, data := range srcs {
 					b.Sources = append(b.Sources, Source{
+						Name:   fmt.Sprintf("%s-%d", format, i),
+						Format: format,
+						Data:   data,
+					})
+				}
+				for i, data := range tails {
+					b.Tail = append(b.Tail, Source{
 						Name:   fmt.Sprintf("%s-%d", format, i),
 						Format: format,
 						Data:   data,

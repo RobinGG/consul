@@ -256,7 +256,6 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		if s.Name == "" {
 			continue
 		}
-		// fmt.Println("Merging", s.Name)
 		c2, err := Parse(s.Data, s.Format)
 		if err != nil {
 			b.err = multierror.Append(b.err, fmt.Errorf("Error parsing %s: %s", s.Name, err))
@@ -358,6 +357,12 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		case ipaddr.IsAnyV6(bindAddr):
 			anyAddr = "::"
 		}
+	}
+
+	// if the bind_addr is nil because of an error we set it to 127.0.0.1
+	// so that the process can continue and we find other errors.
+	if bindAddr == nil {
+		bindAddr = &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
 	}
 
 	var advertiseAddr *net.IPAddr
@@ -784,6 +789,10 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		b.warn(`BootstrapExpect is set to 1; this is the same as Bootstrap mode.`)
 	}
 
+	if rt.ACLReplicationToken != "" {
+		rt.EnableACLReplication = true
+	}
+
 	return rt, nil
 }
 
@@ -933,6 +942,11 @@ func (b *Builder) Validate(rt RuntimeConfig) error {
 
 	if err := structs.ValidateMetadata(rt.NodeMeta, false); err != nil {
 		b.err = multierror.Append(b.err, fmt.Errorf("node_meta: failed to parse: %v", err))
+	}
+
+	// todo(fs): does it need to be < 0 or < 1???
+	if rt.PerformanceRaftMultiplier < 1 || uint(rt.PerformanceRaftMultiplier) > consul.MaxRaftMultiplier {
+		b.err = multierror.Append(b.err, fmt.Errorf("performance.raft_multiplier: value %d not between 1 and %d", rt.PerformanceRaftMultiplier, consul.MaxRaftMultiplier))
 	}
 
 	// make sure listener addresses are unique
@@ -1290,7 +1304,7 @@ func (b *Builder) expandFirstIP(name string, s *string) *net.IPAddr {
 }
 
 func (b *Builder) makeTCPAddr(pri *net.IPAddr, sec net.Addr, port int) *net.TCPAddr {
-	if pri == nil && sec == nil || port <= 0 {
+	if pri == nil && reflect.ValueOf(sec).IsNil() || port <= 0 {
 		return nil
 	}
 	addr := pri
@@ -1311,7 +1325,7 @@ func (b *Builder) makeTCPAddr(pri *net.IPAddr, sec net.Addr, port int) *net.TCPA
 // primary or secondary address and the given port. If the port is <= 0
 // then the address is considered to be disabled and nil is returned.
 func (b *Builder) makeAddr(pri, sec net.Addr, port int) net.Addr {
-	if pri == nil && sec == nil || port <= 0 {
+	if reflect.ValueOf(pri).IsNil() && reflect.ValueOf(sec).IsNil() || port <= 0 {
 		return nil
 	}
 	addr := pri
