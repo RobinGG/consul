@@ -2,12 +2,14 @@ package agent
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"time"
 
 	rawacl "github.com/hashicorp/consul/acl"
+	"github.com/hashicorp/consul/agent/config"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/testutil"
 	"github.com/hashicorp/consul/types"
@@ -16,9 +18,18 @@ import (
 
 func TestACL_Bad_Config(t *testing.T) {
 	t.Parallel()
-	cfg := TestConfig()
-	cfg.ACLDownPolicy = "nope"
-	cfg.DataDir = testutil.TempDir(t, "agent")
+
+	dataDir := testutil.TempDir(t, "agent")
+	defer os.Remove(dataDir)
+
+	cfg := TestConfig(config.Source{
+		Name:   "acl",
+		Format: "hcl",
+		Data: `
+			acl_down_policy = "nope"
+			data_dir = "` + dataDir + `"
+		`,
+	})
 
 	// do not use TestAgent here since we want
 	// the agent to fail during startup.
