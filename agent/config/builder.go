@@ -89,7 +89,6 @@ func NewBuilder(flags Flags) (*Builder, error) {
 	b := &Builder{
 		Flags: flags,
 		Head:  []Source{DefaultSource()},
-		Tail:  []Source{NonUserSource(), DevConsulSource(), DefaultVersionSource()},
 	}
 
 	if b.stringVal(b.Flags.DeprecatedDatacenter) != "" && b.stringVal(b.Flags.Config.Datacenter) == "" {
@@ -107,20 +106,21 @@ func NewBuilder(flags Flags) (*Builder, error) {
 	// merge the config files since the flag values for slices are
 	// otherwise appended instead of prepended.
 	slices, values := b.splitSlicesAndValues(b.Flags.Config)
-	b.Sources = append(b.Sources, newSource("flags.slices", slices))
+	b.Head = append(b.Head, newSource("flags.slices", slices))
 	for _, path := range b.Flags.ConfigFiles {
 		if err := b.ReadPath(path); err != nil {
 			return nil, err
 		}
 	}
-	b.Sources = append(b.Sources, newSource("flags.values", values))
+	b.Tail = append(b.Tail, newSource("flags.values", values))
 	for i, s := range b.Flags.HCL {
-		b.Sources = append(b.Sources, Source{
+		b.Tail = append(b.Tail, Source{
 			Name:   fmt.Sprintf("flags.hcl.%d", i),
 			Format: "hcl",
 			Data:   s,
 		})
 	}
+	b.Tail = append(b.Tail, NonUserSource(), DevConsulSource(), DefaultVersionSource())
 	return b, nil
 }
 
@@ -262,13 +262,13 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	srcs = append(srcs, b.Sources...)
 	srcs = append(srcs, b.Tail...)
 
-	toJson := func(v interface{}) string {
-		b, err := json.Marshal(v)
-		if err != nil {
-			panic(err)
-		}
-		return string(b)
-	}
+	// toJson := func(v interface{}) string {
+	// 	b, err := json.Marshal(v)
+	// 	if err != nil {
+	// 		panic(err)
+	// 	}
+	// 	return string(b)
+	// }
 
 	// parse the config sources into a configuration
 	var c Config
@@ -277,9 +277,9 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 			continue
 		}
 		c2, err := Parse(s.Data, s.Format)
-		fmt.Println("-------------------------------------------------------")
-		fmt.Println("Parse", s.Name)
-		fmt.Println(toJson(c2))
+		// fmt.Println("-------------------------------------------------------")
+		// fmt.Println("Parse", s.Name)
+		// fmt.Println(toJson(c2))
 
 		if err != nil {
 			b.err = multierror.Append(b.err, fmt.Errorf("Error parsing %s: %s", s.Name, err))

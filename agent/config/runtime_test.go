@@ -1485,6 +1485,12 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				if err == nil && tt.err != "" {
 					t.Fatalf("got no error want %q", tt.err)
 				}
+				if err != nil && tt.err == "" {
+					t.Fatalf("got error %s want nil", err)
+				}
+				if err == nil && tt.err != "" {
+					t.Fatalf("got nil want error to contain %q", tt.err)
+				}
 				if err != nil && tt.err != "" && !strings.Contains(err.Error(), tt.err) {
 					t.Fatalf("error %q does not contain %q", err.Error(), tt.err)
 				}
@@ -1501,17 +1507,15 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 
 				// build the runtime config we expect
 				// from the same default config and patch it
-				x := new(Builder)
-				*x = *b
-				x.Sources = nil
-				wantRT, err := x.Build()
+				b.Sources = nil
+				wantRT, err := b.Build()
 				if err != nil {
 					t.Fatalf("build default failed: %s", err)
 				}
 				if tt.patch != nil {
 					tt.patch(&wantRT)
 				}
-				if err := x.Validate(wantRT); err != nil {
+				if err := b.Validate(wantRT); err != nil {
 					t.Fatalf("validate default failed: %s", err)
 				}
 				if got, want := rt, wantRT; !verify.Values(t, "", got, want) {
