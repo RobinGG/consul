@@ -12,6 +12,7 @@ import (
 	"regexp"
 
 	"github.com/armon/go-metrics"
+	"github.com/hashicorp/consul/agent/config"
 	"github.com/hashicorp/consul/agent/consul"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/lib"
@@ -77,19 +78,7 @@ func NewDNSServer(a *Agent) (*DNSServer, error) {
 	// Make sure domain is FQDN, make it case insensitive for ServeMux
 	domain := dns.Fqdn(strings.ToLower(a.config.DNSDomain))
 
-	dnscfg := &dnsConfig{
-		AllowStale:      a.config.DNSAllowStale,
-		Datacenter:      a.config.Datacenter,
-		EnableTruncate:  a.config.DNSEnableTruncate,
-		MaxStale:        a.config.DNSMaxStale,
-		NodeName:        a.config.NodeName,
-		NodeTTL:         a.config.DNSNodeTTL,
-		OnlyPassing:     a.config.DNSOnlyPassing,
-		RecursorTimeout: a.config.DNSRecursorTimeout,
-		SegmentName:     a.config.SegmentName,
-		ServiceTTL:      a.config.DNSServiceTTL,
-		UDPAnswerLimit:  a.config.DNSUDPAnswerLimit,
-	}
+	dnscfg := GetDNSConfig(a.config)
 	srv := &DNSServer{
 		agent:     a,
 		config:    dnscfg,
@@ -100,6 +89,22 @@ func NewDNSServer(a *Agent) (*DNSServer, error) {
 	srv.disableCompression.Store(a.config.DNSDisableCompression)
 
 	return srv, nil
+}
+
+func GetDNSConfig(conf *config.RuntimeConfig) *dnsConfig {
+	return &dnsConfig{
+		AllowStale:      conf.DNSAllowStale,
+		Datacenter:      conf.Datacenter,
+		EnableTruncate:  conf.DNSEnableTruncate,
+		MaxStale:        conf.DNSMaxStale,
+		NodeName:        conf.NodeName,
+		NodeTTL:         conf.DNSNodeTTL,
+		OnlyPassing:     conf.DNSOnlyPassing,
+		RecursorTimeout: conf.DNSRecursorTimeout,
+		SegmentName:     conf.SegmentName,
+		ServiceTTL:      conf.DNSServiceTTL,
+		UDPAnswerLimit:  conf.DNSUDPAnswerLimit,
+	}
 }
 
 func (s *DNSServer) ListenAndServe(network, addr string, notif func()) error {
