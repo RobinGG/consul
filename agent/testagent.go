@@ -216,11 +216,15 @@ func (a *TestAgent) Start() *TestAgent {
 // Shutdown stops the agent and removes the data directory if it is
 // managed by the test agent.
 func (a *TestAgent) Shutdown() error {
+	/* Removed this because it was breaking persistence tests where we would
+	persist a service and load it through a new agent with the same data-dir.
+	Not sure if we still need this for other things, everywhere we manually make
+	a data dir we already do 'defer os.RemoveAll()'
 	defer func() {
 		if a.DataDir != "" {
 			os.RemoveAll(a.DataDir)
 		}
-	}()
+	}()*/
 
 	// shutdown agent before endpoints
 	defer a.Agent.ShutdownEndpoints()
@@ -336,6 +340,9 @@ func TestConfig(sources ...config.Source) *config.RuntimeConfig {
 			server = true
 			node_id = "` + nodeID + `"
 			node_name = "Node ` + nodeID + `"
+			performance {
+				raft_multiplier = 1
+			}
 		`,
 	}
 

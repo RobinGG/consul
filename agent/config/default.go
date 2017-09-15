@@ -47,6 +47,9 @@ var DefaultSource = Source{
 			rpc_rate = -1
 			rpc_max_burst = 1000
 		}
+		performance = {
+			raft_multiplier = 5
+		}
 		ports = {
 			dns = 8600
 			http = 8500
