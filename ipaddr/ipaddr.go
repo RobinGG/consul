@@ -3,6 +3,7 @@ package ipaddr
 import (
 	"fmt"
 	"net"
+	"reflect"
 )
 
 // IsAny checks if the given ip address is an IPv4 or IPv6 ANY address. ip
@@ -25,7 +26,7 @@ func IsAnyV6(ip interface{}) bool {
 }
 
 func iptos(ip interface{}) string {
-	if ip == nil {
+	if ip == nil || reflect.TypeOf(ip).Kind() == reflect.Ptr && reflect.ValueOf(ip).IsNil() {
 		return ""
 	}
 	switch x := ip.(type) {
