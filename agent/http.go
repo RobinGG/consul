@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"net/url"
@@ -25,14 +26,17 @@ type HTTPServer struct {
 
 	// proto is filled by the agent to "http" or "https".
 	proto string
+	addr  net.Addr
 }
 
-func NewHTTPServer(addr string, a *Agent) *HTTPServer {
+func NewHTTPServer(addr net.Addr, a *Agent) *HTTPServer {
 	s := &HTTPServer{
-		Server:    &http.Server{Addr: addr},
+		Server:    &http.Server{Addr: addr.String()},
 		agent:     a,
 		blacklist: NewBlacklist(a.config.HTTPBlockEndpoints),
+		addr:      addr,
 	}
+
 	s.Server.Handler = s.handler(a.config.EnableDebug)
 	return s
 }

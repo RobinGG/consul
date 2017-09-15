@@ -314,7 +314,7 @@ func (a *Agent) Start() error {
 
 	// start HTTP and HTTPS servers
 	for _, l := range httpln {
-		srv := NewHTTPServer(l.Addr().String(), a)
+		srv := NewHTTPServer(l.Addr(), a)
 		if err := a.serveHTTP(l, srv); err != nil {
 			return err
 		}
@@ -486,11 +486,11 @@ func (a *Agent) serveHTTP(l net.Listener, srv *HTTPServer) error {
 	if strings.Contains("*tls.listener", fmt.Sprintf("%T", l)) {
 		srv.proto = "https"
 	}
-	notif := make(chan string)
+	notif := make(chan net.Addr)
 	a.wgServers.Add(1)
 	go func() {
 		defer a.wgServers.Done()
-		notif <- srv.Addr
+		notif <- l.Addr()
 		err := srv.Serve(l)
 		if err != nil && err != http.ErrServerClosed {
 			a.logger.Print(err)
@@ -500,9 +500,9 @@ func (a *Agent) serveHTTP(l net.Listener, srv *HTTPServer) error {
 	select {
 	case addr := <-notif:
 		if srv.proto == "https" {
-			a.logger.Printf("[INFO] agent: Started HTTPS server on %s", addr)
+			a.logger.Printf("[INFO] agent: Started HTTPS server on %s (%s)", addr.String(), addr.Network())
 		} else {
-			a.logger.Printf("[INFO] agent: Started HTTP server on %s", addr)
+			a.logger.Printf("[INFO] agent: Started HTTP server on %s (%s)", addr.String(), addr.Network())
 		}
 		return nil
 	case <-time.After(time.Second):
@@ -1111,12 +1111,12 @@ func (a *Agent) ShutdownEndpoints() {
 	a.dnsServers = nil
 
 	for _, srv := range a.httpServers {
-		a.logger.Printf("[INFO] agent: Stopping %s server %s", strings.ToUpper(srv.proto), srv.Addr)
+		a.logger.Printf("[INFO] agent: Stopping %s server %s (%s)", strings.ToUpper(srv.proto), srv.addr.String(), srv.addr.Network())
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
 		if ctx.Err() == context.DeadlineExceeded {
-			a.logger.Printf("[WARN] agent: Timeout stopping %s server %s", strings.ToUpper(srv.proto), srv.Addr)
+			a.logger.Printf("[WARN] agent: Timeout stopping %s server %s (%s)", strings.ToUpper(srv.proto), srv.addr.String(), srv.addr.Network())
 		}
 	}
 	a.httpServers = nil
