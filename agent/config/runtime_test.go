@@ -1447,8 +1447,8 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				b.Head = append(b.Head, Source{Name: "data_dir", Format: "hcl", Data: `data_dir = "albjldjf"`})
 
 				// mock the hostname function unless a mock is provided
-				hostnameFn := tt.hostname
-				if hostnameFn == nil {
+				b.Hostname = tt.hostname
+				if b.Hostname == nil {
 					b.Hostname = func() (string, error) { return "nodex", nil }
 				}
 
