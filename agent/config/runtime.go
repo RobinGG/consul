@@ -203,11 +203,13 @@ func (c *RuntimeConfig) Sanitized() RuntimeConfig {
 	rt = *c
 	rt.ACLMasterToken = "hidden"
 	rt.ACLToken = "hidden"
+	rt.ACLReplicationToken = "hidden"
 	rt.ACLAgentMasterToken = "hidden"
 	rt.ACLAgentToken = "hidden"
 	rt.EncryptKey = "hidden"
 	rt.RetryJoinLAN = []string{"hidden (improve me)"}
 	rt.RetryJoinWAN = []string{"hidden (improve me)"}
 	rt.ConsulConfig = nil
+	rt.TelemetryCirconusAPIToken = "hidden"
 	return rt
 }

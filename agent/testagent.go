@@ -384,6 +384,6 @@ func TestACLConfig() string {
 		acl_master_token = "root"
 		acl_agent_token = "root"
 		acl_agent_master_token = "towel"
-		acl_enforce_version8 = true
+		acl_enforce_version_8 = true
 	`
 }
