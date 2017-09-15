@@ -111,12 +111,16 @@ func DefaultVersionSource() Source {
 	return VersionSource(version.GitCommit, version.Version, version.VersionPrerelease)
 }
 
-func DefaultRuntimeConfig() *RuntimeConfig {
+func DefaultRuntimeConfig(hcl string) *RuntimeConfig {
 	b := &Builder{
-		Head: []Source{DefaultSource},
-		Tail: []Source{NonUserSource, DefaultVersionSource()},
+		Head:    []Source{DefaultSource},
+		Sources: []Source{{Name: "user", Format: "hcl", Data: hcl}},
+		Tail:    []Source{NonUserSource, DefaultVersionSource()},
 	}
-	rt, _ := b.BuildAndValidate()
+	rt, err := b.BuildAndValidate()
+	if err != nil {
+		panic(err)
+	}
 	return &rt
 }
 

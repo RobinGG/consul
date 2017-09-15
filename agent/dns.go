@@ -653,7 +653,7 @@ func syncExtra(index map[string]dns.RR, resp *dns.Msg) {
 // 1035. Enforce an arbitrary limit that can be further ratcheted down by
 // config, and then make sure the response doesn't exceed 512 bytes. Any extra
 // records will be trimmed along with answers.
-func trimUDPResponse(config *dnsConfig, req, resp *dns.Msg) (trimmed bool) {
+func trimUDPResponse(req, resp *dns.Msg, udpAnswerLimit int) (trimmed bool) {
 	numAnswers := len(resp.Answer)
 	hasExtra := len(resp.Extra) > 0
 	maxSize := defaultMaxUDPSize
@@ -674,7 +674,7 @@ func trimUDPResponse(config *dnsConfig, req, resp *dns.Msg) (trimmed bool) {
 	}
 
 	// This cuts UDP responses to a useful but limited number of responses.
-	maxAnswers := lib.MinInt(maxUDPAnswerLimit, config.UDPAnswerLimit)
+	maxAnswers := lib.MinInt(maxUDPAnswerLimit, udpAnswerLimit)
 	if maxSize == defaultMaxUDPSize && numAnswers > maxAnswers {
 		resp.Answer = resp.Answer[:maxAnswers]
 		if hasExtra {
@@ -778,7 +778,7 @@ func (d *DNSServer) serviceLookup(network, datacenter, service, tag string, req,
 
 	// If the network is not TCP, restrict the number of responses
 	if network != "tcp" {
-		wasTrimmed := trimUDPResponse(d.config, req, resp)
+		wasTrimmed := trimUDPResponse(req, resp, d.config.UDPAnswerLimit)
 
 		// Flag that there are more records to return in the UDP response
 		if wasTrimmed && d.config.EnableTruncate {
@@ -887,7 +887,7 @@ RPC:
 
 	// If the network is not TCP, restrict the number of responses.
 	if network != "tcp" {
-		wasTrimmed := trimUDPResponse(d.config, req, resp)
+		wasTrimmed := trimUDPResponse(req, resp, d.config.UDPAnswerLimit)
 
 		// Flag that there are more records to return in the UDP response
 		if wasTrimmed && d.config.EnableTruncate {
