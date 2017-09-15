@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/consul/tlsutil"
 	"github.com/hashicorp/consul/types"
 	discover "github.com/hashicorp/go-discover"
+	multierror "github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-sockaddr/template"
 	"golang.org/x/time/rate"
 )
@@ -258,7 +259,7 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		// fmt.Println("Merging", s.Name)
 		c2, err := Parse(s.Data, s.Format)
 		if err != nil {
-			return RuntimeConfig{}, fmt.Errorf("Error parsing %s: %s", s.Name, err)
+			b.err = multierror.Append(b.err, fmt.Errorf("Error parsing %s: %s", s.Name, err))
 		}
 		c = Merge(c, c2)
 	}
@@ -275,7 +276,7 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 
 	var dnsServiceTTL = map[string]time.Duration{}
 	for k, v := range c.DNS.ServiceTTL {
-		dnsServiceTTL[k] = b.durationVal(&v)
+		dnsServiceTTL[k] = b.durationVal(fmt.Sprintf("dns_config.service_ttl[%q]", k), &v)
 	}
 
 	leaveOnTerm := !b.boolVal(c.ServerMode)
@@ -313,12 +314,12 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	//
 
 	// determine port values and replace values <= 0 and > 65535 with -1
-	dnsPort := b.portVal(c.Ports.DNS)
-	httpPort := b.portVal(c.Ports.HTTP)
-	httpsPort := b.portVal(c.Ports.HTTPS)
-	serverPort := b.portVal(c.Ports.Server)
-	serfPortLAN := b.portVal(c.Ports.SerfLAN)
-	serfPortWAN := b.portVal(c.Ports.SerfWAN)
+	dnsPort := b.portVal("ports.dns", c.Ports.DNS)
+	httpPort := b.portVal("ports.http", c.Ports.HTTP)
+	httpsPort := b.portVal("ports.https", c.Ports.HTTPS)
+	serverPort := b.portVal("ports.server", c.Ports.Server)
+	serfPortLAN := b.portVal("ports.serf_lan", c.Ports.SerfLAN)
+	serfPortWAN := b.portVal("ports.serf_wan", c.Ports.SerfWAN)
 
 	// determine the default bind and advertise address
 	//
@@ -351,9 +352,6 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 
 	default:
 		bindAddr = b.expandFirstIP("bind_addr", c.BindAddr)
-		if b.err != nil {
-			return RuntimeConfig{}, b.err
-		}
 		switch {
 		case ipaddr.IsAnyV4(bindAddr):
 			anyAddr = "0.0.0.0"
@@ -376,7 +374,8 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		// cannot derive a proper advertise address from the configured
 		// bind address. Hence, the bind address configuration is the
 		// main issue.
-		return RuntimeConfig{}, fmt.Errorf("bind_addr: %s", err)
+		b.err = multierror.Append(b.err, fmt.Errorf("bind_addr: %s", err))
+		advertiseAddr = &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
 	}
 
 	// derive other bind addresses from the bindAddr
@@ -414,7 +413,7 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	var segments []structs.NetworkSegment
 	for _, s := range c.Segments {
 		name := b.stringVal(s.Name)
-		port := b.portVal(s.Port)
+		port := b.portVal(fmt.Sprintf("segments[%s].port", name), s.Port)
 
 		bind := b.makeTCPAddr(
 			b.expandFirstIP(fmt.Sprintf("segments[%s].bind", name), s.Bind),
@@ -428,14 +427,10 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 			port,
 		)
 
-		if b.err != nil {
-			continue
-		}
-
 		// check the port after the addresses since bind/advertise might contain
 		// a unix socket which we want to report first.
 		if port <= 0 {
-			b.err = fmt.Errorf("segment[%s].port must be > 0", name)
+			b.err = multierror.Append(b.err, fmt.Errorf("segment[%s].port must be > 0", name))
 			continue
 		}
 
@@ -615,12 +610,12 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	//
 	rt = RuntimeConfig{
 		// non-user configurable values
-		ACLDisabledTTL:             b.durationVal(c.ACLDisabledTTL),
-		AEInterval:                 b.durationVal(c.AEInterval),
-		CheckDeregisterIntervalMin: b.durationVal(c.CheckDeregisterIntervalMin),
-		CheckReapInterval:          b.durationVal(c.CheckReapInterval),
+		ACLDisabledTTL:             b.durationVal("acl_disabled_ttl", c.ACLDisabledTTL),
+		AEInterval:                 b.durationVal("ae_interval", c.AEInterval),
+		CheckDeregisterIntervalMin: b.durationVal("check_deregister_interval_min", c.CheckDeregisterIntervalMin),
+		CheckReapInterval:          b.durationVal("check_reap_interval", c.CheckReapInterval),
 		Revision:                   b.stringVal(c.Revision),
-		SyncCoordinateIntervalMin:  b.durationVal(c.SyncCoordinateIntervalMin),
+		SyncCoordinateIntervalMin:  b.durationVal("sync_coordinate_interval_min", c.SyncCoordinateIntervalMin),
 		SyncCoordinateRateTarget:   b.float64Val(c.SyncCoordinateRateTarget),
 		Version:                    b.stringVal(c.Version),
 		VersionPrerelease:          b.stringVal(c.VersionPrerelease),
@@ -634,17 +629,17 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		ACLEnforceVersion8:   b.boolVal(c.ACLEnforceVersion8),
 		ACLMasterToken:       b.stringVal(c.ACLMasterToken),
 		ACLReplicationToken:  b.stringVal(c.ACLReplicationToken),
-		ACLTTL:               b.durationVal(c.ACLTTL),
+		ACLTTL:               b.durationVal("acl_ttl", c.ACLTTL),
 		ACLToken:             b.stringVal(c.ACLToken),
 		EnableACLReplication: b.boolVal(c.EnableACLReplication),
 
 		// Autopilot
 		AutopilotCleanupDeadServers:      b.boolVal(c.Autopilot.CleanupDeadServers),
 		AutopilotDisableUpgradeMigration: b.boolVal(c.Autopilot.DisableUpgradeMigration),
-		AutopilotLastContactThreshold:    b.durationVal(c.Autopilot.LastContactThreshold),
+		AutopilotLastContactThreshold:    b.durationVal("autopilot.last_contact_threshold", c.Autopilot.LastContactThreshold),
 		AutopilotMaxTrailingLogs:         b.int64Val(c.Autopilot.MaxTrailingLogs),
 		AutopilotRedundancyZoneTag:       b.stringVal(c.Autopilot.RedundancyZoneTag),
-		AutopilotServerStabilizationTime: b.durationVal(c.Autopilot.ServerStabilizationTime),
+		AutopilotServerStabilizationTime: b.durationVal("autopilot.server_stabilization_time", c.Autopilot.ServerStabilizationTime),
 		AutopilotUpgradeVersionTag:       b.stringVal(c.Autopilot.UpgradeVersionTag),
 
 		// DNS
@@ -653,11 +648,11 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		DNSDisableCompression: b.boolVal(c.DNS.DisableCompression),
 		DNSDomain:             b.stringVal(c.DNSDomain),
 		DNSEnableTruncate:     b.boolVal(c.DNS.EnableTruncate),
-		DNSMaxStale:           b.durationVal(c.DNS.MaxStale),
-		DNSNodeTTL:            b.durationVal(c.DNS.NodeTTL),
+		DNSMaxStale:           b.durationVal("dns_config.max_stale", c.DNS.MaxStale),
+		DNSNodeTTL:            b.durationVal("dns_config.node_ttl", c.DNS.NodeTTL),
 		DNSOnlyPassing:        b.boolVal(c.DNS.OnlyPassing),
 		DNSPort:               dnsPort,
-		DNSRecursorTimeout:    b.durationVal(c.DNS.RecursorTimeout),
+		DNSRecursorTimeout:    b.durationVal("recursor_timeout", c.DNS.RecursorTimeout),
 		DNSRecursors:          dnsRecursors,
 		DNSServiceTTL:         dnsServiceTTL,
 		DNSUDPAnswerLimit:     b.intVal(c.DNS.UDPAnswerLimit),
@@ -706,7 +701,7 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		CAFile:                      b.stringVal(c.CAFile),
 		CAPath:                      b.stringVal(c.CAPath),
 		CertFile:                    b.stringVal(c.CertFile),
-		CheckUpdateInterval:         b.durationVal(c.CheckUpdateInterval),
+		CheckUpdateInterval:         b.durationVal("check_update_interval", c.CheckUpdateInterval),
 		Checks:                      checks,
 		ClientAddrs:                 clientAddrs,
 		ConsulConfig:                consulConfig,
@@ -740,11 +735,11 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		RPCProtocol:                 b.intVal(c.RPCProtocol),
 		RPCRateLimit:                rate.Limit(b.float64Val(c.Limits.RPCRate)),
 		RaftProtocol:                b.intVal(c.RaftProtocol),
-		ReconnectTimeoutLAN:         b.durationVal(c.ReconnectTimeoutLAN),
-		ReconnectTimeoutWAN:         b.durationVal(c.ReconnectTimeoutWAN),
+		ReconnectTimeoutLAN:         b.durationVal("reconnect_timeout", c.ReconnectTimeoutLAN),
+		ReconnectTimeoutWAN:         b.durationVal("reconnect_timeout_wan", c.ReconnectTimeoutWAN),
 		RejoinAfterLeave:            b.boolVal(c.RejoinAfterLeave),
-		RetryJoinIntervalLAN:        b.durationVal(c.RetryJoinIntervalLAN),
-		RetryJoinIntervalWAN:        b.durationVal(c.RetryJoinIntervalWAN),
+		RetryJoinIntervalLAN:        b.durationVal("retry_interval", c.RetryJoinIntervalLAN),
+		RetryJoinIntervalWAN:        b.durationVal("retry_interval_wan", c.RetryJoinIntervalWAN),
 		RetryJoinLAN:                c.RetryJoinLAN,
 		RetryJoinMaxAttemptsLAN:     b.intVal(c.RetryJoinMaxAttemptsLAN),
 		RetryJoinMaxAttemptsWAN:     b.intVal(c.RetryJoinMaxAttemptsWAN),
@@ -761,12 +756,12 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		ServerName:                  b.stringVal(c.ServerName),
 		ServerPort:                  serverPort,
 		Services:                    services,
-		SessionTTLMin:               b.durationVal(c.SessionTTLMin),
+		SessionTTLMin:               b.durationVal("session_ttl_min", c.SessionTTLMin),
 		SkipLeaveOnInt:              skipLeaveOnInt,
 		StartJoinAddrsLAN:           c.StartJoinAddrsLAN,
 		StartJoinAddrsWAN:           c.StartJoinAddrsWAN,
 		SyslogFacility:              b.stringVal(c.SyslogFacility),
-		TLSCipherSuites:             b.tlsCipherSuites(c.TLSCipherSuites),
+		TLSCipherSuites:             b.tlsCipherSuites("tls_cipher_suites", c.TLSCipherSuites),
 		TLSMinVersion:               b.stringVal(c.TLSMinVersion),
 		TLSPreferServerCipherSuites: b.boolVal(c.TLSPreferServerCipherSuites),
 		TaggedAddresses:             c.TaggedAddresses,
@@ -789,72 +784,79 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		b.warn(`BootstrapExpect is set to 1; this is the same as Bootstrap mode.`)
 	}
 
-	return rt, b.err
+	return rt, nil
 }
 
 // Validate performs semantical validation of the runtime configuration.
 func (b *Builder) Validate(rt RuntimeConfig) error {
+	if rt.AEInterval <= 0 {
+		b.err = multierror.Append(b.err, fmt.Errorf("ae_interval: must be positive: %s", rt.AEInterval))
+	}
+
 	if rt.AutopilotMaxTrailingLogs < 0 {
-		return fmt.Errorf("autopilot.max_trailing_logs < 0")
+		b.err = multierror.Append(b.err, fmt.Errorf("autopilot.max_trailing_logs: cannot be negative: %d", rt.AutopilotMaxTrailingLogs))
 	}
 
 	// validDatacenter is used to validate a datacenter
 	var validDatacenter = regexp.MustCompile("^[a-z0-9_-]+$")
 
-	if !validDatacenter.MatchString(rt.Datacenter) {
-		return fmt.Errorf("Datacenter must be alpha-numeric with underscores and hyphens only")
+	if rt.Datacenter == "" {
+		b.err = multierror.Append(b.err, fmt.Errorf("datacenter: cannot be empty"))
+	} else if !validDatacenter.MatchString(rt.Datacenter) {
+		b.err = multierror.Append(b.err, fmt.Errorf("datacenter: invalid value %q. Please use only [a-z0-9-_].", rt.Datacenter))
 	}
 
 	if rt.ACLDatacenter != "" && !validDatacenter.MatchString(rt.ACLDatacenter) {
-		return fmt.Errorf("ACL datacenter must be alpha-numeric with underscores and hyphens only")
+		b.err = multierror.Append(b.err, fmt.Errorf("acl_datacenter: invalid value %q. Please use only [a-z0-9-_].", rt.ACLDatacenter))
 	}
 
 	if rt.Bootstrap && !rt.ServerMode {
-		return fmt.Errorf("Bootstrap mode requires Server mode")
+		b.err = multierror.Append(b.err, fmt.Errorf("'bootstrap = true' requires 'server = true'"))
 	}
 
 	if rt.BootstrapExpect < 0 {
-		return fmt.Errorf("BootstrapExpect cannot be negative")
+		b.err = multierror.Append(b.err, fmt.Errorf("bootstrap_expect: cannot be negative"))
 	}
 
 	if rt.BootstrapExpect > 0 && !rt.ServerMode {
-		return fmt.Errorf("BootstrapExpect mode requires Server mode")
+		b.err = multierror.Append(b.err, fmt.Errorf("'bootstrap_expect > 0' requires 'server = true'"))
 	}
 
 	if rt.BootstrapExpect > 0 && rt.DevMode {
-		return fmt.Errorf("BootstrapExpect mode cannot be enabled in dev mode")
+		b.err = multierror.Append(b.err, fmt.Errorf("'bootstrap_expect > 0' not allowed in dev mode"))
 	}
 
 	if rt.BootstrapExpect > 0 && rt.Bootstrap {
-		return fmt.Errorf("BootstrapExpect mode and Bootstrap mode are mutually exclusive")
+		b.err = multierror.Append(b.err, fmt.Errorf("'bootstrap_expect > 0' and 'bootstrap = true' are mutually exclusive"))
 	}
 
-	if rt.BootstrapExpect > 1 {
-		b.warn("BootstrapExpect mode enabled, expecting %d servers", rt.BootstrapExpect)
-	}
-	if rt.BootstrapExpect == 2 {
-		b.warn(`A cluster with 2 servers will provide no failure tolerance.  See https://www.consul.io/docs/internals/consensus.html#deployment-table`)
+	if rt.ServerMode && !rt.DevMode && !rt.Bootstrap && rt.BootstrapExpect > 1 {
+		b.warn("bootstrap_expect > 0: expecting %d servers", rt.BootstrapExpect)
 	}
 
-	if rt.BootstrapExpect > 2 && rt.BootstrapExpect%2 == 0 {
-		b.warn(`A cluster with an even number of servers does not achieve optimum fault tolerance.  See https://www.consul.io/docs/internals/consensus.html#deployment-table`)
+	if rt.ServerMode && !rt.DevMode && !rt.Bootstrap && rt.BootstrapExpect == 2 {
+		b.warn(`bootstrap_expect = 2: A cluster with 2 servers will provide no failure tolerance. See https://www.consul.io/docs/internals/consensus.html#deployment-table`)
 	}
 
-	if rt.Bootstrap {
-		b.warn(`Bootstrap mode enabled! Do not enable unless necessary`)
+	if rt.ServerMode && !rt.Bootstrap && rt.BootstrapExpect > 2 && rt.BootstrapExpect%2 == 0 {
+		b.warn(`bootstrap_expect is even number: A cluster with an even number of servers does not achieve optimum fault tolerance. See https://www.consul.io/docs/internals/consensus.html#deployment-table`)
+	}
+
+	if rt.ServerMode && rt.Bootstrap && rt.BootstrapExpect == 0 {
+		b.warn(`bootstrap = true: do not enable unless necessary`)
 	}
 
 	if !rt.DevMode {
 		if rt.DataDir == "" {
-			b.warn("Must specify data directory using -data-dir")
+			b.err = multierror.Append(b.err, fmt.Errorf("data_dir: cannot be empty"))
 		}
 
 		if finfo, err := os.Stat(rt.DataDir); err != nil {
 			if !os.IsNotExist(err) {
-				b.warn(fmt.Sprintf("Error getting data-dir: %s", err))
+				b.warn(fmt.Sprintf("data_dir: stat failed: %s", err))
 			}
 		} else if !finfo.IsDir() {
-			b.warn(fmt.Sprintf("The data-dir specified at %q is not a directory", rt.DataDir))
+			b.warn(fmt.Sprintf("data_dir: not a directory: %s", rt.DataDir))
 		}
 	}
 
@@ -874,7 +876,7 @@ func (b *Builder) Validate(rt RuntimeConfig) error {
 
 	if rt.EncryptKey != "" {
 		if _, err := decodeBytes(rt.EncryptKey); err != nil {
-			b.warn(fmt.Sprintf("Invalid encryption key: %s", err))
+			b.warn(fmt.Sprintf("encrypt: invalid key: %s", err))
 		}
 		keyfileLAN := filepath.Join(rt.DataDir, SerfLANKeyring)
 		if _, err := os.Stat(keyfileLAN); err == nil {
@@ -889,48 +891,48 @@ func (b *Builder) Validate(rt RuntimeConfig) error {
 	}
 
 	if rt.EnableUI && rt.UIDir != "" {
-		return fmt.Errorf(
-			"Both the ui and ui-dir flags were specified, please provide only one.\n" +
-				"If trying to use your own web UI resources, use the ui-dir flag.\n" +
-				"If using Consul version 0.7.0 or later, the web UI is included in the binary so use ui to enable it")
+		b.err = multierror.Append(b.err, fmt.Errorf(
+			"Both the ui and ui-dir flags were specified, please provide only one.\n"+
+				"If trying to use your own web UI resources, use the ui-dir flag.\n"+
+				"If using Consul version 0.7.0 or later, the web UI is included in the binary so use ui to enable it"))
 	}
 
 	if ipaddr.IsAny(rt.AdvertiseAddrLAN) {
-		return fmt.Errorf("Advertise address cannot be 0.0.0.0, :: or [::]")
+		b.err = multierror.Append(b.err, fmt.Errorf("advertise_addr: cannot be 0.0.0.0, :: or [::]"))
 	}
 
 	if ipaddr.IsAny(rt.AdvertiseAddrWAN) {
-		return fmt.Errorf("Advertise WAN address cannot be 0.0.0.0, :: or [::]")
+		b.err = multierror.Append(b.err, fmt.Errorf("advertise_addr_wan: cannot be 0.0.0.0, :: or [::]"))
 	}
 
 	if ipaddr.IsAny(rt.RPCAdvertiseAddr) {
-		return fmt.Errorf("RPC Advertise address cannot be 0.0.0.0, :: or [::]")
+		b.err = multierror.Append(b.err, fmt.Errorf("advertise_addrs.rpc: cannot be 0.0.0.0, :: or [::]"))
 	}
 
 	if ipaddr.IsAny(rt.SerfAdvertiseAddrLAN) {
-		return fmt.Errorf("Serf Advertise LAN address cannot be 0.0.0.0, :: or [::]")
+		b.err = multierror.Append(b.err, fmt.Errorf("advertise_addrs.serf_lan: cannot be 0.0.0.0, :: or [::]"))
 	}
 
 	if ipaddr.IsAny(rt.SerfAdvertiseAddrWAN) {
-		return fmt.Errorf("Serf Advertise WAN address cannot be 0.0.0.0, :: or [::]")
+		b.err = multierror.Append(b.err, fmt.Errorf("advertise_addrs.serf_wan: cannot be 0.0.0.0, :: or [::]"))
 	}
 
 	for _, s := range rt.Segments {
 		if ipaddr.IsAny(s.Advertise) {
-			return fmt.Errorf("segments[%s].advertise cannot be 0.0.0.0, :: or [::]", s.Name)
+			b.err = multierror.Append(b.err, fmt.Errorf("segments[%s].advertise: cannot be 0.0.0.0, :: or [::]", s.Name))
 		}
 	}
 
 	if rt.DNSUDPAnswerLimit <= 0 {
-		return fmt.Errorf("dns_config.udp_answer_limit must be > 0")
+		b.err = multierror.Append(b.err, fmt.Errorf("dns_config.udp_answer_limit: must be positive: %d", rt.DNSUDPAnswerLimit))
 	}
 
 	if rt.NodeName == "" {
-		return fmt.Errorf("Node name cannot be empty")
+		b.err = multierror.Append(b.err, fmt.Errorf("node_name: cannot be empty"))
 	}
 
 	if err := structs.ValidateMetadata(rt.NodeMeta, false); err != nil {
-		return fmt.Errorf("Failed to parse node metadata: %v", err)
+		b.err = multierror.Append(b.err, fmt.Errorf("node_meta: failed to parse: %v", err))
 	}
 
 	// make sure listener addresses are unique
@@ -939,7 +941,7 @@ func (b *Builder) Validate(rt RuntimeConfig) error {
 	uniqueAddr := func(name string, addr net.Addr) error {
 		key := addr.Network() + ":" + addr.String()
 		if other, inuse := usage[key]; inuse {
-			return fmt.Errorf("%s address %s already configured for %s", name, addr.String(), other)
+			b.err = multierror.Append(b.err, fmt.Errorf("%s address %s already configured for %s", name, addr.String(), other))
 		}
 		usage[key] = name
 		return nil
@@ -954,33 +956,33 @@ func (b *Builder) Validate(rt RuntimeConfig) error {
 	}
 
 	if err := uniqueAddrs("DNS", rt.DNSAddrs); err != nil {
-		return err
+		b.err = multierror.Append(b.err, err)
 	}
 	if err := uniqueAddrs("HTTP", rt.HTTPAddrs); err != nil {
-		return err
+		b.err = multierror.Append(b.err, err)
 	}
 	if err := uniqueAddrs("HTTPS", rt.HTTPSAddrs); err != nil {
-		return err
+		b.err = multierror.Append(b.err, err)
 	}
 	if err := uniqueAddr("RPC Advertise", rt.RPCAdvertiseAddr); err != nil {
-		return err
+		b.err = multierror.Append(b.err, err)
 	}
 	if err := uniqueAddr("Serf Advertise LAN", rt.SerfAdvertiseAddrLAN); err != nil {
-		return err
+		b.err = multierror.Append(b.err, err)
 	}
 	if err := uniqueAddr("Serf Advertise WAN", rt.SerfAdvertiseAddrWAN); err != nil {
-		return err
+		b.err = multierror.Append(b.err, err)
 	}
 
 	if rt.ServerMode && rt.SegmentName != "" {
-		return fmt.Errorf("Segment option can only be set on clients")
+		b.err = multierror.Append(b.err, fmt.Errorf("segment: Segment name can only be set on clients (server = false)"))
 	}
 
 	if !rt.ServerMode && len(rt.Segments) > 0 {
-		return fmt.Errorf("Segments can only be configured on servers")
+		b.err = multierror.Append(b.err, fmt.Errorf("segments: Segments can only be configured on servers (server = true)"))
 	}
 
-	return nil
+	return b.err
 }
 
 // splitSlicesAndValues moves all slice values defined in c to 'slices'
@@ -1005,7 +1007,7 @@ func (b *Builder) warn(msg string, args ...interface{}) {
 }
 
 func (b *Builder) checkVal(v *CheckDefinition) *structs.CheckDefinition {
-	if b.err != nil || v == nil {
+	if v == nil {
 		return nil
 	}
 
@@ -1050,18 +1052,18 @@ func (b *Builder) checkVal(v *CheckDefinition) *structs.CheckDefinition {
 		Header:            v.Header,
 		Method:            b.stringVal(v.Method),
 		TCP:               b.stringVal(v.TCP),
-		Interval:          b.durationVal(v.Interval),
+		Interval:          b.durationVal(fmt.Sprintf("check[%s].interval", id), v.Interval),
 		DockerContainerID: b.stringVal(dockerContainerID),
 		Shell:             b.stringVal(v.Shell),
 		TLSSkipVerify:     b.boolVal(tlsSkipVerify),
-		Timeout:           b.durationVal(v.Timeout),
-		TTL:               b.durationVal(v.TTL),
-		DeregisterCriticalServiceAfter: b.durationVal(deregisterCriticalServiceAfter),
+		Timeout:           b.durationVal(fmt.Sprintf("check[%s].timeout", id), v.Timeout),
+		TTL:               b.durationVal(fmt.Sprintf("check[%s].ttl", id), v.TTL),
+		DeregisterCriticalServiceAfter: b.durationVal(fmt.Sprintf("check[%s].deregister_critical_service_after", id), deregisterCriticalServiceAfter),
 	}
 }
 
 func (b *Builder) serviceVal(v *ServiceDefinition) *structs.ServiceDefinition {
-	if b.err != nil || v == nil {
+	if v == nil {
 		return nil
 	}
 
@@ -1086,81 +1088,83 @@ func (b *Builder) serviceVal(v *ServiceDefinition) *structs.ServiceDefinition {
 }
 
 func (b *Builder) boolVal(v *bool) bool {
-	if b.err != nil || v == nil {
+	if v == nil {
 		return false
 	}
 	return *v
 }
 
-func (b *Builder) durationVal(v *string) (d time.Duration) {
-	if b.err != nil || v == nil {
+func (b *Builder) durationVal(name string, v *string) (d time.Duration) {
+	if v == nil {
 		return 0
 	}
-	d, b.err = time.ParseDuration(*v)
-	return
+	d, err := time.ParseDuration(*v)
+	if err != nil {
+		b.err = multierror.Append(fmt.Errorf("%s: invalid duration: %q: %s", name, *v, err))
+	}
+	return d
 }
 
 func (b *Builder) intVal(v *int) int {
-	if b.err != nil || v == nil {
+	if v == nil {
 		return 0
 	}
 	return *v
 }
 
-func (b *Builder) portVal(v *int) int {
-	if b.err != nil || v == nil || *v <= 0 || *v > 65535 {
+func (b *Builder) portVal(name string, v *int) int {
+	if v == nil || *v <= 0 {
 		return -1
+	}
+	if *v > 65535 {
+		b.err = multierror.Append(b.err, fmt.Errorf("%s: invalid port: %d", name, *v))
 	}
 	return *v
 }
 
 func (b *Builder) int64Val(v *int64) int64 {
-	if b.err != nil || v == nil {
+	if v == nil {
 		return 0
 	}
 	return int64(*v)
 }
 
 func (b *Builder) uint64Val(v *uint64) uint64 {
-	if b.err != nil || v == nil {
+	if v == nil {
 		return 0
 	}
 	return *v
 }
 
 func (b *Builder) stringVal(v *string) string {
-	if b.err != nil || v == nil {
+	if v == nil {
 		return ""
 	}
 	return *v
 }
 
 func (b *Builder) float64Val(v *float64) float64 {
-	if b.err != nil || v == nil {
+	if v == nil {
 		return 0
 	}
 
 	return *v
 }
 
-func (b *Builder) tlsCipherSuites(v *string) []uint16 {
-	if b.err != nil || v == nil {
+func (b *Builder) tlsCipherSuites(name string, v *string) []uint16 {
+	if v == nil {
 		return nil
 	}
 
 	var a []uint16
 	a, err := tlsutil.ParseCiphers(*v)
 	if err != nil {
-		b.err = fmt.Errorf("invalid tls cipher suites: %s", err)
+		b.err = multierror.Append(b.err, fmt.Errorf("%s: invalid tls cipher suites: %s", name, err))
 	}
 	return a
 }
 
 func (b *Builder) nodeName(v *string) string {
-	if b.err != nil {
-		return ""
-	}
-
 	nodeName := b.stringVal(v)
 	if nodeName == "" {
 		fn := b.Hostname
@@ -1169,7 +1173,7 @@ func (b *Builder) nodeName(v *string) string {
 		}
 		name, err := fn()
 		if err != nil {
-			b.err = fmt.Errorf("Error determining node name: %s", err)
+			b.err = multierror.Append(b.err, fmt.Errorf("node_name: %s", err))
 			return ""
 		}
 		nodeName = name
@@ -1180,13 +1184,13 @@ func (b *Builder) nodeName(v *string) string {
 // expandAddrs expands the go-sockaddr template in s and returns the
 // result as a list of *net.IPAddr and *net.UnixAddr.
 func (b *Builder) expandAddrs(name string, s *string) []net.Addr {
-	if b.err != nil || s == nil || *s == "" {
+	if s == nil || *s == "" {
 		return nil
 	}
 
 	x, err := template.Parse(*s)
 	if err != nil {
-		b.err = fmt.Errorf("%s: error parsing %q: %s", name, s, err)
+		b.err = multierror.Append(b.err, fmt.Errorf("%s: error parsing %q: %s", name, s, err))
 		return nil
 	}
 
@@ -1202,7 +1206,7 @@ func (b *Builder) expandAddrs(name string, s *string) []net.Addr {
 				ip = net.ParseIP("::")
 			}
 			if ip == nil {
-				b.err = fmt.Errorf("%s: invalid ip address: %s", name, a)
+				b.err = multierror.Append(b.err, fmt.Errorf("%s: invalid ip address: %s", name, a))
 				return nil
 			}
 			addrs = append(addrs, &net.IPAddr{IP: ip})
@@ -1216,7 +1220,7 @@ func (b *Builder) expandAddrs(name string, s *string) []net.Addr {
 // *net.IPAddr. If one of the expanded addresses is a unix socket
 // address an error is set and nil is returned.
 func (b *Builder) expandIPs(name string, s *string) []*net.IPAddr {
-	if b.err != nil || s == nil || *s == "" {
+	if s == nil || *s == "" {
 		return nil
 	}
 
@@ -1227,10 +1231,10 @@ func (b *Builder) expandIPs(name string, s *string) []*net.IPAddr {
 		case *net.IPAddr:
 			x = append(x, a)
 		case *net.UnixAddr:
-			b.err = fmt.Errorf("%s: cannot use a unix socket: %s", name, a)
+			b.err = multierror.Append(b.err, fmt.Errorf("%s: cannot use a unix socket: %s", name, a))
 			return nil
 		default:
-			b.err = fmt.Errorf("%s: invalid address type %T", name, a)
+			b.err = multierror.Append(b.err, fmt.Errorf("%s: invalid address type %T", name, a))
 			return nil
 		}
 	}
@@ -1242,7 +1246,7 @@ func (b *Builder) expandIPs(name string, s *string) []*net.IPAddr {
 // the template expands to multiple addresses and error is set and nil
 // is returned.
 func (b *Builder) expandFirstAddr(name string, s *string) net.Addr {
-	if b.err != nil || s == nil || *s == "" {
+	if s == nil || *s == "" {
 		return nil
 	}
 
@@ -1255,7 +1259,7 @@ func (b *Builder) expandFirstAddr(name string, s *string) net.Addr {
 		for _, a := range addrs {
 			x = append(x, a.String())
 		}
-		b.err = fmt.Errorf("%s: multiple addresses found: %s", name, strings.Join(x, " "))
+		b.err = multierror.Append(b.err, fmt.Errorf("%s: multiple addresses found: %s", name, strings.Join(x, " ")))
 		return nil
 	}
 	return addrs[0]
@@ -1265,7 +1269,7 @@ func (b *Builder) expandFirstAddr(name string, s *string) net.Addr {
 // first address if it is not a unix socket address. If the template
 // expands to multiple addresses and error is set and nil is returned.
 func (b *Builder) expandFirstIP(name string, s *string) *net.IPAddr {
-	if b.err != nil || s == nil || *s == "" {
+	if s == nil || *s == "" {
 		return nil
 	}
 
@@ -1277,10 +1281,10 @@ func (b *Builder) expandFirstIP(name string, s *string) *net.IPAddr {
 	case *net.IPAddr:
 		return a
 	case *net.UnixAddr:
-		b.err = fmt.Errorf("%s: cannot use a unix socket: %s", name, addr)
+		b.err = multierror.Append(b.err, fmt.Errorf("%s: cannot use a unix socket: %s", name, addr))
 		return nil
 	default:
-		b.err = fmt.Errorf("%s: invalid address type %T", name, a)
+		b.err = multierror.Append(b.err, fmt.Errorf("%s: invalid address type %T", name, a))
 		return nil
 	}
 }

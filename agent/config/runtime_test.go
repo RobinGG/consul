@@ -97,7 +97,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 		json     []string
 		hcl      []string
 		patch    func(rt *RuntimeConfig)
-		err      error
+		err      string
 		warns    []string
 		hostname func() (string, error)
 	}{
@@ -168,7 +168,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
 			},
-			warns: []string{"Bootstrap mode enabled! Do not enable unless necessary"},
+			warns: []string{"bootstrap = true: do not enable unless necessary"},
 		},
 		{
 			desc:  "-bootstrap-expect",
@@ -179,7 +179,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
 			},
-			warns: []string{"BootstrapExpect mode enabled, expecting 3 servers"},
+			warns: []string{"bootstrap_expect > 0: expecting 3 servers"},
 		},
 		{
 			desc:  "-client",
@@ -203,7 +203,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 			patch: func(rt *RuntimeConfig) {
 				rt.DataDir = ""
 			},
-			warns: []string{"Must specify data directory using -data-dir"},
+			err: "data_dir: cannot be empty",
 		},
 		{
 			desc:  "-data-dir given non-directory",
@@ -211,7 +211,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 			patch: func(rt *RuntimeConfig) {
 				rt.DataDir = "runtime_test.go"
 			},
-			warns: []string{"The data-dir specified at \"runtime_test.go\" is not a directory"},
+			warns: []string{`data_dir: not a directory: runtime_test.go`},
 		},
 		{
 			desc:  "-datacenter",
@@ -1129,79 +1129,79 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 			desc: "datacenter invalid",
 			json: []string{`{ "datacenter": "%" }`},
 			hcl:  []string{`datacenter = "%"`},
-			err:  errors.New("Datacenter must be alpha-numeric with underscores and hyphens only"),
+			err:  `datacenter: invalid value "%". Please use only [a-z0-9-_]`,
 		},
 		{
 			desc:  "acl_datacenter invalid",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "acl_datacenter": "%" }`},
 			hcl:   []string{`acl_datacenter = "%"`},
-			err:   errors.New("ACL datacenter must be alpha-numeric with underscores and hyphens only"),
+			err:   `acl_datacenter: invalid value "%". Please use only [a-z0-9-_]`,
 		},
 		{
 			desc:  "autopilot.max_trailing_logs invalid",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "autopilot": { "max_trailing_logs": -1 } }`},
 			hcl:   []string{`autopilot = { max_trailing_logs = -1 }`},
-			err:   errors.New("autopilot.max_trailing_logs < 0"),
+			err:   "autopilot.max_trailing_logs: cannot be negative: -1",
 		},
 		{
 			desc:  "bind does not allow socket",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "bind_addr": "unix:///foo" }`},
 			hcl:   []string{`bind_addr = "unix:///foo"`},
-			err:   errors.New("bind_addr: cannot use a unix socket: /foo"),
+			err:   "bind_addr: cannot use a unix socket: /foo",
 		},
 		{
 			desc:  "bootstrap without server",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "bootstrap": true }`},
 			hcl:   []string{`bootstrap = true`},
-			err:   errors.New("Bootstrap mode requires Server mode"),
+			err:   "'bootstrap = true' requires 'server = true'",
 		},
 		{
 			desc:  "bootstrap-expect without server",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "bootstrap_expect": 3 }`},
 			hcl:   []string{`bootstrap_expect = 3`},
-			err:   errors.New("BootstrapExpect mode requires Server mode"),
+			err:   "'bootstrap_expect > 0' requires 'server = true'",
 		},
 		{
 			desc:  "bootstrap-expect invalid",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "bootstrap_expect": -1 }`},
 			hcl:   []string{`bootstrap_expect = -1`},
-			err:   errors.New("BootstrapExpect cannot be negative"),
+			err:   "bootstrap_expect: cannot be negative",
 		},
 		{
 			desc:  "bootstrap-expect and dev mode",
 			flags: []string{`-datacenter=a`, `-dev`},
 			json:  []string{`{ "bootstrap_expect": 3, "server": true }`},
 			hcl:   []string{`bootstrap_expect = 3 server = true`},
-			err:   errors.New("BootstrapExpect mode cannot be enabled in dev mode"),
+			err:   "'bootstrap_expect > 0' not allowed in dev mode",
 		},
 		{
 			desc:  "bootstrap-expect and boostrap",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "bootstrap": true, "bootstrap_expect": 3, "server": true }`},
 			hcl:   []string{`bootstrap = true bootstrap_expect = 3 server = true`},
-			err:   errors.New("BootstrapExpect mode and Bootstrap mode are mutually exclusive"),
+			err:   "'bootstrap_expect > 0' and 'bootstrap = true' are mutually exclusive",
 		},
 		{
 			desc:  "client does not allow socket",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "client_addr": "unix:///foo" }`},
 			hcl:   []string{`client_addr = "unix:///foo"`},
-			err:   errors.New("client_addr: cannot use a unix socket: /foo"),
+			err:   "client_addr: cannot use a unix socket: /foo",
 		},
 		{
 			desc:  "enable_ui and ui_dir",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "enable_ui": true, "ui_dir": "a" }`},
 			hcl:   []string{`enable_ui = true ui_dir = "a"`},
-			err: errors.New("Both the ui and ui-dir flags were specified, please provide only one.\n" +
+			err: "Both the ui and ui-dir flags were specified, please provide only one.\n" +
 				"If trying to use your own web UI resources, use the ui-dir flag.\n" +
-				"If using Consul version 0.7.0 or later, the web UI is included in the binary so use ui to enable it"),
+				"If using Consul version 0.7.0 or later, the web UI is included in the binary so use ui to enable it",
 		},
 
 		// test ANY address failures
@@ -1211,71 +1211,69 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "advertise_addr": "0.0.0.0" }`},
 			hcl:   []string{`advertise_addr = "0.0.0.0"`},
-			err:   errors.New("Advertise address cannot be 0.0.0.0, :: or [::]"),
+			err:   "advertise_addr: cannot be 0.0.0.0, :: or [::]",
 		},
 		{
 			desc:  "advertise_addr_wan any",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "advertise_addr_wan": "::" }`},
 			hcl:   []string{`advertise_addr_wan = "::"`},
-			err:   errors.New("Advertise WAN address cannot be 0.0.0.0, :: or [::]"),
+			err:   "advertise_addr_wan: cannot be 0.0.0.0, :: or [::]",
 		},
 		{
 			desc:  "advertise_addrs.rpc any",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "advertise_addrs":{ "rpc": "[::]" } }`},
 			hcl:   []string{`advertise_addrs = { rpc = "[::]" }`},
-			err:   errors.New("RPC Advertise address cannot be 0.0.0.0, :: or [::]"),
+			err:   "advertise_addrs.rpc: cannot be 0.0.0.0, :: or [::]",
 		},
 		{
 			desc:  "advertise_addrs.serf_lan any",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "advertise_addrs":{ "serf_lan": "[::]" } }`},
 			hcl:   []string{`advertise_addrs = { serf_lan = "[::]" }`},
-			err:   errors.New("Serf Advertise LAN address cannot be 0.0.0.0, :: or [::]"),
+			err:   "advertise_addrs.serf_lan: cannot be 0.0.0.0, :: or [::]",
 		},
 		{
 			desc:  "advertise_addrs.serf_wan any",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "advertise_addrs":{ "serf_wan": "0.0.0.0" } }`},
 			hcl:   []string{`advertise_addrs = { serf_wan = "0.0.0.0" }`},
-			err:   errors.New("Serf Advertise WAN address cannot be 0.0.0.0, :: or [::]"),
+			err:   "advertise_addrs.serf_wan: cannot be 0.0.0.0, :: or [::]",
 		},
-		//todo(fs): rpc advertise any addr
-		//todo(fs): segment advertise no socket
 		{
-			desc:  "segment.advertise any",
-			flags: []string{`-datacenter=a`},
+			desc:  "segments.advertise any",
+			flags: []string{`-datacenter=a`, `-server=true`},
 			json:  []string{`{ "segments":[{ "name":"x", "advertise": "::", "port": 123 }] }`},
 			hcl:   []string{`segments = [{ name = "x" advertise = "::" port = 123 }]`},
-			err:   errors.New(`segments[x].advertise cannot be 0.0.0.0, :: or [::]`),
+			err:   `segments[x].advertise: cannot be 0.0.0.0, :: or [::]`,
 		},
 		{
-			desc:  "segment.advertise socket",
-			flags: []string{`-datacenter=a`},
+			desc:  "segments.advertise socket",
+			flags: []string{`-datacenter=a`, `-server=true`},
 			json:  []string{`{ "segments":[{ "name":"x", "advertise": "unix:///foo" }] }`},
 			hcl:   []string{`segments = [{ name = "x" advertise = "unix:///foo" }]`},
-			err:   errors.New(`segments[x].advertise: cannot use a unix socket: /foo`),
+			err:   `segments[x].advertise: cannot use a unix socket: /foo`,
 		},
 		{
 			desc:  "dns_config.udp_answer_limit invalid",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "dns_config": { "udp_answer_limit": 0 } }`},
 			hcl:   []string{`dns_config = { udp_answer_limit = 0 }`},
-			err:   errors.New("dns_config.udp_answer_limit must be > 0"),
+			err:   "dns_config.udp_answer_limit: must be positive: 0",
 		},
 		{
 			desc:  "dns_config.udp_answer_limit invalid",
 			flags: []string{`-datacenter=a`},
 			json:  []string{`{ "dns_config": { "udp_answer_limit": 0 } }`},
 			hcl:   []string{`dns_config = { udp_answer_limit = 0 }`},
-			err:   errors.New("dns_config.udp_answer_limit must be > 0"),
+			err:   "dns_config.udp_answer_limit: must be positive: 0",
 		},
 		{
 			desc:     "node_name invalid",
 			flags:    []string{`-datacenter=a`},
 			hostname: func() (string, error) { return "", nil },
-			err:      errors.New("Node name cannot be empty"),
+			err:      "node_name: cannot be empty",
 		},
 		{
 			desc:  "node_meta key too long",
@@ -1288,7 +1286,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				`dns_config = { udp_answer_limit = 1 }`,
 				`node_meta = { "` + randomString(130) + `" = "a" }`,
 			},
-			err: errors.New("Failed to parse node metadata: Couldn't load metadata pair ('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'a'): Key is too long (limit: 128 characters)"),
+			err: "Key is too long (limit: 128 characters)",
 		},
 		{
 			desc:  "node_meta value too long",
@@ -1301,7 +1299,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				`dns_config = { udp_answer_limit = 1 }`,
 				`node_meta = { "a" = "` + randomString(520) + `" }`,
 			},
-			err: errors.New("Failed to parse node metadata: Couldn't load metadata pair ('a', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'): Value is too long (limit: 512 characters)"),
+			err: "Value is too long (limit: 512 characters)",
 		},
 		{
 			desc:  "node_meta too many keys",
@@ -1314,7 +1312,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				`dns_config = { udp_answer_limit = 1 }`,
 				`node_meta = {` + metaPairs(70, "hcl") + ` }`,
 			},
-			err: errors.New("Failed to parse node metadata: Node metadata cannot contain more than 64 key/value pairs"),
+			err: "Node metadata cannot contain more than 64 key/value pairs",
 		},
 		{
 			desc:  "unique listeners dns vs http",
@@ -1329,7 +1327,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 					ports = { dns = 1000 http = 1000 }
 					dns_config = { udp_answer_limit = 1 }
 				`},
-			err: errors.New("HTTP address 1.2.3.4:1000 already configured for DNS"),
+			err: "HTTP address 1.2.3.4:1000 already configured for DNS",
 		},
 		{
 			desc:  "unique listeners dns vs https",
@@ -1344,7 +1342,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 					ports = { dns = 1000 https = 1000 }
 					dns_config = { udp_answer_limit = 1 }
 				`},
-			err: errors.New("HTTPS address 1.2.3.4:1000 already configured for DNS"),
+			err: "HTTPS address 1.2.3.4:1000 already configured for DNS",
 		},
 		{
 			desc:  "unique listeners http vs https",
@@ -1359,7 +1357,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 					ports = { http = 1000 https = 1000 }
 					dns_config = { udp_answer_limit = 1 }
 				`},
-			err: errors.New("HTTPS address 1.2.3.4:1000 already configured for HTTP"),
+			err: "HTTPS address 1.2.3.4:1000 already configured for HTTP",
 		},
 	}
 
@@ -1435,8 +1433,12 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 
 				// build/merge the config fragments
 				rt, err := b.BuildAndValidate()
-				if got, want := err, tt.err; !reflect.DeepEqual(got, want) {
-					t.Fatalf("got error %v want %v", got, want)
+				if err == nil && tt.err != "" {
+					t.Fatalf("got no error want %q", tt.err)
+				}
+				if err != nil && tt.err != "" && !strings.Contains(err.Error(), tt.err) {
+
+					t.Fatalf("error %q does not contain %q", err.Error(), tt.err)
 				}
 
 				// check the warnings
@@ -1445,7 +1447,7 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				}
 
 				// stop if we expected an error
-				if tt.err != nil {
+				if tt.err != "" {
 					return
 				}
 
@@ -2784,7 +2786,7 @@ func TestFullConfig(t *testing.T) {
 	warns := []string{
 		`==> DEPRECATION: "addresses.rpc" is deprecated and is no longer used. Please remove it from your configuration.`,
 		`==> DEPRECATION: "ports.rpc" is deprecated and is no longer used. Please remove it from your configuration.`,
-		`BootstrapExpect mode enabled, expecting 53 servers`,
+		`bootstrap_expect > 0: expecting 53 servers`,
 	}
 
 	// ensure that all fields are set to unique non-zero values
