@@ -66,17 +66,62 @@ type Builder struct {
 	// is called.
 	Hostname func() (string, error)
 
-	// PrivateIPv4 will return the private IPv4 address found.
-	// If there are multiple private IPv4 addresses an error is returned.
-	PrivateIPv4 func() (*net.IPAddr, error)
-
-	// PublicIPv6 will return the public IPv6 address found.
-	// If there are multiple public IPv6 addresses an error is returned.
-	PublicIPv6 func() (*net.IPAddr, error)
+	// DetectIP returns a single ip address of the given type.
+	// If there are multiple addresses of the same type an error
+	// is returned. Valid types are 'private_v4' and 'public_v6'.
+	// If the type is invalid the function panics.
+	DetectIP func(typ string) (*net.IPAddr, error)
 
 	// err contains the first error that occurred during
 	// building the runtime configuration.
 	err error
+}
+
+func NewBuilder(flags Flags) (*Builder, error) {
+	newSource := func(name string, v interface{}) Source {
+		b, err := json.MarshalIndent(v, "", "    ")
+		if err != nil {
+			panic(err)
+		}
+		return Source{Name: name, Format: "json", Data: string(b)}
+	}
+
+	b := &Builder{
+		Flags: flags,
+		Head:  []Source{DefaultSource()},
+		Tail:  []Source{NonUserSource(), DevConsulSource(), DefaultVersionSource()},
+	}
+
+	if b.stringVal(b.Flags.DeprecatedDatacenter) != "" && b.stringVal(b.Flags.Config.Datacenter) == "" {
+		b.Flags.Config.Datacenter = b.Flags.DeprecatedDatacenter
+	}
+
+	if b.boolVal(b.Flags.DevMode) {
+		b.Head = append(b.Head, DevSource())
+		b.Tail = append(b.Tail, DevConsulSource())
+	}
+
+	// Since the merge logic is to overwrite all fields with later
+	// values except slices which are merged by appending later values
+	// we need to merge all slice values defined in flags before we
+	// merge the config files since the flag values for slices are
+	// otherwise appended instead of prepended.
+	slices, values := b.splitSlicesAndValues(b.Flags.Config)
+	b.Sources = append(b.Sources, newSource("flags.slices", slices))
+	for _, path := range b.Flags.ConfigFiles {
+		if err := b.ReadPath(path); err != nil {
+			return nil, err
+		}
+	}
+	b.Sources = append(b.Sources, newSource("flags.values", values))
+	for i, s := range b.Flags.HCL {
+		b.Sources = append(b.Sources, Source{
+			Name:   fmt.Sprintf("flags.hcl.%d", i),
+			Format: "hcl",
+			Data:   s,
+		})
+	}
+	return b, nil
 }
 
 // ReadPath reads a single config file or all files in a directory (but
@@ -155,24 +200,23 @@ func (b *Builder) BuildAndValidate() (RuntimeConfig, error) {
 	return rt, nil
 }
 
-// singlePrivateIPv4 returns a single private IPv4 address if one is
-// available. If multiple addresses are available an error is returned.
-func singlePrivateIPv4() (*net.IPAddr, error) {
-	ip, err := consul.GetPrivateIP()
-	if err != nil {
-		return nil, err
+func detectIP(typ string) (*net.IPAddr, error) {
+	switch typ {
+	case "private_v4":
+		ip, err := consul.GetPrivateIP()
+		if err != nil {
+			return nil, err
+		}
+		return &net.IPAddr{IP: ip}, nil
+	case "public_v6":
+		ip, err := consul.GetPublicIPv6()
+		if err != nil {
+			return nil, err
+		}
+		return &net.IPAddr{IP: ip}, nil
+	default:
+		panic("invalid address type: " + typ)
 	}
-	return &net.IPAddr{IP: ip}, nil
-}
-
-// singlePublicIPv6 returns a single public IPv6 address if one is
-// available. If multiple addresses are available an error is returned.
-func singlePublicIPv6() (*net.IPAddr, error) {
-	ip, err := consul.GetPublicIPv6()
-	if err != nil {
-		return nil, err
-	}
-	return &net.IPAddr{IP: ip}, nil
 }
 
 // Build constructs the runtime configuration from the config sources
@@ -203,7 +247,7 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	if b.Flags.DeprecatedAtlasEndpoint != nil {
 		b.warn(`==> DEPRECATION: "-atlas-endpoint" is deprecated. Please remove it from your configuration`)
 	}
-	if b.stringVal(b.Flags.DeprecatedDatacenter) != "" && b.stringVal(b.Flags.Config.Datacenter) == "" {
+	if b.stringVal(b.Flags.DeprecatedDatacenter) != "" {
 		b.warn(`==> DEPRECATION: "-dc" is deprecated. Use "-datacenter" instead`)
 		b.Flags.Config.Datacenter = b.Flags.DeprecatedDatacenter
 	}
@@ -211,52 +255,32 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	// ----------------------------------------------------------------
 	// merge config sources as follows
 	//
-	//   default, files in alphabetical order, flags
-	//
-	// Since the merge logic is to overwrite all fields with later
-	// values except slices which are merged by appending later values
-	// we need to merge all slice values defined in flags before we
-	// merge the config files since the flag values for slices are
-	// otherwise appended instead of prepended.
-
-	toJson := func(name string, v interface{}) Source {
-		b, err := json.MarshalIndent(v, "", "    ")
-		if err != nil {
-			panic(err)
-		}
-		return Source{Name: name, Format: "json", Data: string(b)}
-	}
 
 	// build the list of config sources
 	var srcs []Source
-	if len(b.Head) == 0 {
-		srcs = append(srcs, DefaultSource)
-	}
 	srcs = append(srcs, b.Head...)
-	if b.boolVal(b.Flags.DevMode) {
-		srcs = append(srcs, DevSource)
-	}
-
-	flagSlices, flagValues := b.splitSlicesAndValues(b.Flags.Config)
-	srcs = append(srcs, toJson("flags.slices", flagSlices))
 	srcs = append(srcs, b.Sources...)
-	srcs = append(srcs, toJson("flags.values", flagValues))
-	for i, s := range b.Flags.HCL {
-		srcs = append(srcs, Source{
-			Name:   fmt.Sprintf("flag.hcl.%d", i),
-			Format: "hcl",
-			Data:   s,
-		})
-	}
 	srcs = append(srcs, b.Tail...)
+
+	toJson := func(v interface{}) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			panic(err)
+		}
+		return string(b)
+	}
 
 	// parse the config sources into a configuration
 	var c Config
 	for _, s := range srcs {
-		if s.Name == "" {
+		if s.Name == "" || s.Data == "" {
 			continue
 		}
 		c2, err := Parse(s.Data, s.Format)
+		fmt.Println("-------------------------------------------------------")
+		fmt.Println("Parse", s.Name)
+		fmt.Println(toJson(c2))
+
 		if err != nil {
 			b.err = multierror.Append(b.err, fmt.Errorf("Error parsing %s: %s", s.Name, err))
 		}
@@ -328,15 +352,6 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	// configuration since we can listen on an ANY address for incoming
 	// traffic but cannot advertise it as the address on which the
 	// server can be reached.
-	privateIPv4 := b.PrivateIPv4
-	if privateIPv4 == nil {
-		privateIPv4 = singlePrivateIPv4
-	}
-
-	publicIPv6 := b.PublicIPv6
-	if publicIPv6 == nil {
-		publicIPv6 = singlePublicIPv6
-	}
 
 	var bindAddr *net.IPAddr
 	var anyAddr string
@@ -365,12 +380,17 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		bindAddr = &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
 	}
 
+	detect := detectIP
+	if b.DetectIP != nil {
+		detect = b.DetectIP
+	}
+
 	var advertiseAddr *net.IPAddr
 	switch anyAddr {
 	case "0.0.0.0":
-		advertiseAddr, err = privateIPv4()
+		advertiseAddr, err = detect("private_v4")
 	case "::":
-		advertiseAddr, err = publicIPv6()
+		advertiseAddr, err = detect("public_v6")
 	default:
 		advertiseAddr = bindAddr
 	}
@@ -604,12 +624,6 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		b.warn(`==> DEPRECATION: "retry_join_gce" is deprecated. Please add %q to "retry_join".`, m)
 	}
 
-	var consulConfig *consul.Config
-	if b.boolVal(b.Flags.DevMode) {
-		consulConfig = consul.DefaultConfig()
-		consulConfig = devConsulConfig(consulConfig)
-	}
-
 	// ----------------------------------------------------------------
 	// build runtime config
 	//
@@ -624,6 +638,21 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		SyncCoordinateRateTarget:   b.float64Val(c.SyncCoordinateRateTarget),
 		Version:                    b.stringVal(c.Version),
 		VersionPrerelease:          b.stringVal(c.VersionPrerelease),
+
+		// consul configuration
+		ConsulCoordinateUpdatePeriod: b.durationVal("consul.coordinate.update_period", c.Consul.Coordinate.UpdatePeriod),
+		ConsulRaftElectionTimeout:    b.durationVal("consul.raft.election_timeout", c.Consul.Raft.ElectionTimeout),
+		ConsulRaftHeartbeatTimeout:   b.durationVal("consul.raft.heartbeat_timeout", c.Consul.Raft.HeartbeatTimeout),
+		ConsulRaftLeaderLeaseTimeout: b.durationVal("consul.raft.leader_lease_timeout", c.Consul.Raft.LeaderLeaseTimeout),
+		ConsulSerfLANGossipInterval:  b.durationVal("consul.serf_lan.gossip_interval", c.Consul.SerfLAN.Memberlist.GossipInterval),
+		ConsulSerfLANProbeInterval:   b.durationVal("consul.serf_lan.probe_interval", c.Consul.SerfLAN.Memberlist.ProbeInterval),
+		ConsulSerfLANProbeTimeout:    b.durationVal("consul.serf_lan.probe_timeout", c.Consul.SerfLAN.Memberlist.ProbeTimeout),
+		ConsulSerfLANSuspicionMult:   b.intVal(c.Consul.SerfLAN.Memberlist.SuspicionMult),
+		ConsulSerfWANGossipInterval:  b.durationVal("consul.serf_wan.gossip_interval", c.Consul.SerfWAN.Memberlist.GossipInterval),
+		ConsulSerfWANProbeInterval:   b.durationVal("consul.serf_wan.probe_interval", c.Consul.SerfWAN.Memberlist.ProbeInterval),
+		ConsulSerfWANProbeTimeout:    b.durationVal("consul.serf_wan.probe_timeout", c.Consul.SerfWAN.Memberlist.ProbeTimeout),
+		ConsulSerfWANSuspicionMult:   b.intVal(c.Consul.SerfWAN.Memberlist.SuspicionMult),
+		ConsulServerHealthInterval:   b.durationVal("consul.server.health_interval", c.Consul.Server.HealthInterval),
 
 		// ACL
 		ACLAgentMasterToken:  b.stringVal(c.ACLAgentMasterToken),
@@ -709,7 +738,6 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		CheckUpdateInterval:         b.durationVal("check_update_interval", c.CheckUpdateInterval),
 		Checks:                      checks,
 		ClientAddrs:                 clientAddrs,
-		ConsulConfig:                consulConfig,
 		DataDir:                     b.stringVal(c.DataDir),
 		Datacenter:                  strings.ToLower(b.stringVal(c.Datacenter)),
 		DevMode:                     b.boolVal(b.Flags.DevMode),

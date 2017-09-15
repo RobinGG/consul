@@ -568,14 +568,6 @@ func (a *Agent) consulConfig() (*consul.Config, error) {
 	// Start with the provided config or default config
 	base := consul.DefaultConfig()
 
-	// a.config.ConsulConfig, if set, is a partial configuration for the
-	// consul server or client. Therefore, clone and augment it but
-	// don't use it as base directly.
-	if a.config.ConsulConfig != nil {
-		base = new(consul.Config)
-		*base = *a.config.ConsulConfig
-	}
-
 	// This is set when the agent starts up
 	base.NodeID = a.config.NodeID
 
@@ -594,12 +586,22 @@ func (a *Agent) consulConfig() (*consul.Config, error) {
 	base.DataDir = a.config.DataDir
 	base.NodeName = a.config.NodeName
 
+	base.CoordinateUpdatePeriod = a.config.ConsulCoordinateUpdatePeriod
+
+	base.RaftConfig.HeartbeatTimeout = a.config.ConsulRaftHeartbeatTimeout
+	base.RaftConfig.LeaderLeaseTimeout = a.config.ConsulRaftLeaderLeaseTimeout
+	base.RaftConfig.ElectionTimeout = a.config.ConsulRaftElectionTimeout
+
 	base.SerfLANConfig.MemberlistConfig.BindAddr = a.config.SerfBindAddrLAN.IP.String()
 	base.SerfLANConfig.MemberlistConfig.BindPort = a.config.SerfPortLAN
 	base.SerfLANConfig.MemberlistConfig.AdvertiseAddr = a.config.SerfAdvertiseAddrLAN.IP.String()
 	base.SerfLANConfig.MemberlistConfig.AdvertisePort = a.config.SerfPortLAN
 	base.SerfLANConfig.MemberlistConfig.GossipVerifyIncoming = a.config.EncryptVerifyIncoming
 	base.SerfLANConfig.MemberlistConfig.GossipVerifyOutgoing = a.config.EncryptVerifyOutgoing
+	base.SerfLANConfig.MemberlistConfig.GossipInterval = a.config.ConsulSerfLANGossipInterval
+	base.SerfLANConfig.MemberlistConfig.ProbeInterval = a.config.ConsulSerfLANProbeInterval
+	base.SerfLANConfig.MemberlistConfig.ProbeTimeout = a.config.ConsulSerfLANProbeTimeout
+	base.SerfLANConfig.MemberlistConfig.SuspicionMult = a.config.ConsulSerfLANSuspicionMult
 
 	base.SerfWANConfig.MemberlistConfig.BindAddr = a.config.SerfBindAddrWAN.IP.String()
 	base.SerfWANConfig.MemberlistConfig.BindPort = a.config.SerfPortWAN
@@ -607,6 +609,10 @@ func (a *Agent) consulConfig() (*consul.Config, error) {
 	base.SerfWANConfig.MemberlistConfig.AdvertisePort = a.config.SerfPortWAN
 	base.SerfWANConfig.MemberlistConfig.GossipVerifyIncoming = a.config.EncryptVerifyIncoming
 	base.SerfWANConfig.MemberlistConfig.GossipVerifyOutgoing = a.config.EncryptVerifyOutgoing
+	base.SerfWANConfig.MemberlistConfig.GossipInterval = a.config.ConsulSerfWANGossipInterval
+	base.SerfWANConfig.MemberlistConfig.ProbeInterval = a.config.ConsulSerfWANProbeInterval
+	base.SerfWANConfig.MemberlistConfig.ProbeTimeout = a.config.ConsulSerfWANProbeTimeout
+	base.SerfWANConfig.MemberlistConfig.SuspicionMult = a.config.ConsulSerfWANSuspicionMult
 
 	base.RPCAddr = a.config.RPCBindAddr
 	base.RPCAdvertise = a.config.RPCAdvertiseAddr

@@ -154,6 +154,7 @@ type Config struct {
 	AEInterval                 *string  `json:"ae_interval,omitempty" hcl:"ae_interval"`
 	CheckDeregisterIntervalMin *string  `json:"check_deregister_interval_min,omitempty" hcl:"check_deregister_interval_min"`
 	CheckReapInterval          *string  `json:"check_reap_interval,omitempty" hcl:"check_reap_interval"`
+	Consul                     Consul   `json:"consul,omitempty" hcl:"consul"`
 	Revision                   *string  `json:"revision,omitempty" hcl:"revision"`
 	SyncCoordinateIntervalMin  *string  `json:"sync_coordinate_interval_min,omitempty" hcl:"sync_coordinate_interval_min"`
 	SyncCoordinateRateTarget   *float64 `json:"sync_coordinate_rate_target,omitempty" hcl:"sync_coordinate_rate_target"`
@@ -175,6 +176,40 @@ type Config struct {
 	DeprecatedStatsdAddr             *string           `json:"statsd_addr,omitempty" hcl:"statsd_addr"`
 	DeprecatedStatsiteAddr           *string           `json:"statsite_addr,omitempty" hcl:"statsite_addr"`
 	DeprecatedStatsitePrefix         *string           `json:"statsite_prefix,omitempty" hcl:"statsite_prefix"`
+}
+
+type Consul struct {
+	Coordinate *struct {
+		UpdatePeriod *string `json:"update_period,omitempty" hcl:"update_period"`
+	} `json:"coordinate,omitempty" hcl:"coordinate"`
+
+	Raft *struct {
+		ElectionTimeout    *string `json:"election_timeout,omitempty" hcl:"election_timeout"`
+		HeartbeatTimeout   *string `json:"heartbeat_timeout,omitempty" hcl:"heartbeat_timeout"`
+		LeaderLeaseTimeout *string `json:"leader_lease_timeout,omitempty" hcl:"leader_lease_timeout"`
+	} `json:"raft,omitempty" hcl:"raft"`
+
+	SerfLAN *struct {
+		Memberlist *struct {
+			GossipInterval *string `json:"gossip_interval,omitempty" hcl:"gossip_interval"`
+			ProbeInterval  *string `json:"probe_interval,omitempty" hcl:"probe_interval"`
+			ProbeTimeout   *string `json:"probe_timeout,omitempty" hcl:"probe_timeout"`
+			SuspicionMult  *int    `json:"suspicion_mult,omitempty" hcl:"suspicion_mult"`
+		} `json:"memberlist,omitempty" hcl:"memberlist"`
+	} `json:"serf_lan,omitempty" hcl:"serf_lan"`
+
+	SerfWAN *struct {
+		Memberlist *struct {
+			GossipInterval *string `json:"gossip_interval,omitempty" hcl:"gossip_interval"`
+			ProbeInterval  *string `json:"probe_interval,omitempty" hcl:"probe_interval"`
+			ProbeTimeout   *string `json:"probe_timeout,omitempty" hcl:"probe_timeout"`
+			SuspicionMult  *int    `json:"suspicion_mult,omitempty" hcl:"suspicion_mult"`
+		} `json:"memberlist,omitempty" hcl:"memberlist"`
+	} `json:"serf_wan,omitempty" hcl:"serf_wan"`
+
+	Server *struct {
+		HealthInterval *string `json:"health_interval,omitempty" hcl:"health_interval"`
+	} `json:"server,omitempty" hcl:"server"`
 }
 
 type Addresses struct {
@@ -329,7 +364,7 @@ type UnixSocket struct {
 }
 
 type Limits struct {
-	RPCMaxBurst *int    `json:"rpc_max_burst,omitempty" hcl:"rpc_max_burst"`
+	RPCMaxBurst *int     `json:"rpc_max_burst,omitempty" hcl:"rpc_max_burst"`
 	RPCRate     *float64 `json:"rpc_rate,omitempty" hcl:"rpc_rate"`
 }
 

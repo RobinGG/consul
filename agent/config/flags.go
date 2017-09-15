@@ -24,7 +24,7 @@ type Flags struct {
 	HCL []string
 
 	// DeprecatedDatacenter holds the value for the `-dc` flag which is an alias
-	// for `-datacenter.
+	// for -datacenter.
 	DeprecatedDatacenter *string
 
 	// The DeprecatedAtlas* fields hold the values for deprecated flags.

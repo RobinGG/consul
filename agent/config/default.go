@@ -2,17 +2,19 @@ package config
 
 import (
 	"fmt"
-	"time"
+	"strconv"
 
 	"github.com/hashicorp/consul/agent/consul"
 	"github.com/hashicorp/consul/version"
 )
 
 // DefaultSource is the default agent configuration.
-var DefaultSource = Source{
-	Name:   "default",
-	Format: "hcl",
-	Data: `
+// This needs to be merged first in the head.
+func DefaultSource() Source {
+	return Source{
+		Name:   "default",
+		Format: "hcl",
+		Data: `
 		acl_default_policy = "allow"
 		acl_down_policy = "extend-cache"
 		acl_enforce_version8 = true
@@ -63,14 +65,16 @@ var DefaultSource = Source{
 			filter_default = true
 		}
 	`,
+	}
 }
 
 // DevSource is the additional default configuration for dev mode.
-// This should be loaded after the default configuration.
-var DevSource = Source{
-	Name:   "dev",
-	Format: "hcl",
-	Data: `
+// This should be merged in the head after the default configuration.
+func DevSource() Source {
+	return Source{
+		Name:   "dev",
+		Format: "hcl",
+		Data: `
 		bind_addr = "127.0.0.1"
 		disable_anonymous_signature = true
 		disable_keyring_file = true
@@ -79,14 +83,16 @@ var DevSource = Source{
 		log_level = "DEBUG"
 		server = true
 	`,
+	}
 }
 
 // NonUserSource contains the values the user cannot configure.
-// This needs to be merged last.
-var NonUserSource = Source{
-	Name:   "non-user",
-	Format: "hcl",
-	Data: `
+// This needs to be merged in the tail.
+func NonUserSource() Source {
+	return Source{
+		Name:   "non-user",
+		Format: "hcl",
+		Data: `
 		acl_disabled_ttl = "120s"
 		check_deregister_interval_min = "1m"
 		check_reap_interval = "30s"
@@ -94,9 +100,12 @@ var NonUserSource = Source{
 		sync_coordinate_rate_target = 64
 		sync_coordinate_interval_min = "15s"
 	`,
+	}
 }
 
 // VersionSource creates a config source for the version parameters.
+// This should be merged in the tail since these values are not
+// user configurable.
 func VersionSource(rev, ver, verPre string) Source {
 	return Source{
 		Name:   "version",
@@ -111,34 +120,98 @@ func DefaultVersionSource() Source {
 	return VersionSource(version.GitCommit, version.Version, version.VersionPrerelease)
 }
 
+// DefaultConsulSource returns the default configuration for the consul agent.
+// This should be merged in the tail since these values are not user configurable.
+func DefaultConsulSource() Source {
+	cfg := consul.DefaultConfig()
+	raft := cfg.RaftConfig
+	serfLAN := cfg.SerfLANConfig.MemberlistConfig
+	serfWAN := cfg.SerfWANConfig.MemberlistConfig
+	return Source{
+		Name:   "consul",
+		Format: "hcl",
+		Data: `
+		consul = {
+			coordinate = {
+				update_period = "` + cfg.CoordinateUpdatePeriod.String() + `"
+			}
+			raft = {
+				election_timeout = "` + raft.ElectionTimeout.String() + `"
+				heartbeat_timeout = "` + raft.HeartbeatTimeout.String() + `"
+				leader_lease_timeout = "` + raft.LeaderLeaseTimeout.String() + `"
+			}
+			serf_lan = {
+				memberlist = {
+					gossip_interval = "` + serfLAN.GossipInterval.String() + `"
+					probe_interval = "` + serfLAN.ProbeInterval.String() + `"
+					probe_timeout = "` + serfLAN.ProbeTimeout.String() + `"
+					suspicion_mult = ` + strconv.Itoa(serfLAN.SuspicionMult) + `
+				}
+			}
+			serf_wan = {
+				memberlist = {
+					gossip_interval = "` + serfWAN.GossipInterval.String() + `"
+					probe_interval = "` + serfWAN.ProbeInterval.String() + `"
+					probe_timeout = "` + serfWAN.ProbeTimeout.String() + `"
+					suspicion_mult = ` + strconv.Itoa(serfWAN.SuspicionMult) + `
+				}
+			}
+			server = {
+				health_interval = "` + cfg.ServerHealthInterval.String() + `"
+			}
+		}
+	`,
+	}
+}
+
+// DevConsulSource returns the consul agent configuration for the dev mode.
+// This should be merged in the tail after the DefaultConsulSource.
+func DevConsulSource() Source {
+	return Source{
+		Name:   "consul",
+		Format: "hcl",
+		Data: `
+		consul = {
+			coordinate = {
+				update_period = "100ms"
+			}
+			raft = {
+				election_timeout = "40ms"
+				heartbeat_timeout = "40ms"
+				leader_lease_timeout = "20ms"
+			}
+			serf_lan = {
+				memberlist = {
+					gossip_interval = "100ms"
+					probe_interval = "100ms"
+					probe_timeout = "100ms"
+					suspicion_mult = 3
+				}
+			}
+			serf_wan = {
+				memberlist = {
+					gossip_interval = "100ms"
+					probe_interval = "100ms"
+					probe_timeout = "100ms"
+					suspicion_mult = 3
+				}
+			}
+			server = {
+				health_interval = "10ms"
+			}
+		}
+	`,
+	}
+}
+
 func DefaultRuntimeConfig(hcl string) *RuntimeConfig {
-	b := &Builder{
-		Head:    []Source{DefaultSource},
-		Sources: []Source{{Name: "user", Format: "hcl", Data: hcl}},
-		Tail:    []Source{NonUserSource, DefaultVersionSource()},
+	b, err := NewBuilder(Flags{HCL: []string{hcl}})
+	if err != nil {
+		panic(err)
 	}
 	rt, err := b.BuildAndValidate()
 	if err != nil {
 		panic(err)
 	}
 	return &rt
-}
-
-func devConsulConfig(conf *consul.Config) *consul.Config {
-	conf.SerfLANConfig.MemberlistConfig.ProbeTimeout = 100 * time.Millisecond
-	conf.SerfLANConfig.MemberlistConfig.ProbeInterval = 100 * time.Millisecond
-	conf.SerfLANConfig.MemberlistConfig.GossipInterval = 100 * time.Millisecond
-
-	conf.SerfWANConfig.MemberlistConfig.SuspicionMult = 3
-	conf.SerfWANConfig.MemberlistConfig.ProbeTimeout = 100 * time.Millisecond
-	conf.SerfWANConfig.MemberlistConfig.ProbeInterval = 100 * time.Millisecond
-	conf.SerfWANConfig.MemberlistConfig.GossipInterval = 100 * time.Millisecond
-
-	conf.RaftConfig.LeaderLeaseTimeout = 20 * time.Millisecond
-	conf.RaftConfig.HeartbeatTimeout = 40 * time.Millisecond
-	conf.RaftConfig.ElectionTimeout = 40 * time.Millisecond
-
-	conf.CoordinateUpdatePeriod = 100 * time.Millisecond
-
-	return conf
 }

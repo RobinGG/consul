@@ -6,7 +6,6 @@ import (
 
 	"crypto/tls"
 
-	"github.com/hashicorp/consul/agent/consul"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/tlsutil"
 	"github.com/hashicorp/consul/types"
@@ -22,12 +21,26 @@ type RuntimeConfig struct {
 	ACLDisabledTTL             time.Duration
 	CheckDeregisterIntervalMin time.Duration
 	CheckReapInterval          time.Duration
-	ConsulConfig               *consul.Config
 	SyncCoordinateRateTarget   float64
 	SyncCoordinateIntervalMin  time.Duration
 	Revision                   string
 	Version                    string
 	VersionPrerelease          string
+
+	// consul config
+	ConsulCoordinateUpdatePeriod time.Duration
+	ConsulRaftElectionTimeout    time.Duration
+	ConsulRaftHeartbeatTimeout   time.Duration
+	ConsulRaftLeaderLeaseTimeout time.Duration
+	ConsulSerfLANGossipInterval  time.Duration
+	ConsulSerfLANProbeInterval   time.Duration
+	ConsulSerfLANProbeTimeout    time.Duration
+	ConsulSerfLANSuspicionMult   int
+	ConsulSerfWANGossipInterval  time.Duration
+	ConsulSerfWANProbeInterval   time.Duration
+	ConsulSerfWANProbeTimeout    time.Duration
+	ConsulSerfWANSuspicionMult   int
+	ConsulServerHealthInterval   time.Duration
 
 	ACLAgentMasterToken string
 	ACLAgentToken       string
@@ -209,7 +222,6 @@ func (c *RuntimeConfig) Sanitized() RuntimeConfig {
 	rt.EncryptKey = "hidden"
 	rt.RetryJoinLAN = []string{"hidden (improve me)"}
 	rt.RetryJoinWAN = []string{"hidden (improve me)"}
-	rt.ConsulConfig = nil
 	rt.TelemetryCirconusAPIToken = "hidden"
 	return rt
 }

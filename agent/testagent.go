@@ -346,10 +346,13 @@ func TestConfig(sources ...config.Source) *config.RuntimeConfig {
 		`,
 	}
 
-	b := &config.Builder{
-		Head: []config.Source{config.DefaultSource, testsrc},
-		Tail: append([]config.Source{config.NonUserSource, config.DefaultVersionSource()}, sources...),
+	b, err := config.NewBuilder(config.Flags{})
+	if err != nil {
+		panic("NewBuilder failed: " + err.Error())
 	}
+	b.Head = append(b.Head, testsrc)
+	b.Tail = append(b.Tail, sources...)
+	b.Tail = append(b.Tail, config.DevConsulSource())
 
 	cfg, err := b.BuildAndValidate()
 	if err != nil {
@@ -360,25 +363,6 @@ func TestConfig(sources ...config.Source) *config.RuntimeConfig {
 		fmt.Println("WARNING:", w)
 	}
 
-	ccfg := consul.DefaultConfig()
-	cfg.ConsulConfig = ccfg
-
-	ccfg.SerfLANConfig.MemberlistConfig.SuspicionMult = 3
-	ccfg.SerfLANConfig.MemberlistConfig.ProbeTimeout = 100 * time.Millisecond
-	ccfg.SerfLANConfig.MemberlistConfig.ProbeInterval = 100 * time.Millisecond
-	ccfg.SerfLANConfig.MemberlistConfig.GossipInterval = 100 * time.Millisecond
-
-	ccfg.SerfWANConfig.MemberlistConfig.SuspicionMult = 3
-	ccfg.SerfWANConfig.MemberlistConfig.ProbeTimeout = 100 * time.Millisecond
-	ccfg.SerfWANConfig.MemberlistConfig.ProbeInterval = 100 * time.Millisecond
-	ccfg.SerfWANConfig.MemberlistConfig.GossipInterval = 100 * time.Millisecond
-
-	ccfg.RaftConfig.LeaderLeaseTimeout = 20 * time.Millisecond
-	ccfg.RaftConfig.HeartbeatTimeout = 40 * time.Millisecond
-	ccfg.RaftConfig.ElectionTimeout = 40 * time.Millisecond
-
-	ccfg.CoordinateUpdatePeriod = 100 * time.Millisecond
-	ccfg.ServerHealthInterval = 10 * time.Millisecond
 	return &cfg
 }
 

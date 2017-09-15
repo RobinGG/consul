@@ -60,21 +60,11 @@ func (cmd *AgentCommand) readConfig() *config.RuntimeConfig {
 		return nil
 	}
 
-	b := config.Builder{
-		Flags: flags,
-		Head:  []config.Source{config.DefaultSource},
-		Tail:  []config.Source{config.NonUserSource, config.DefaultVersionSource()},
+	b, err := config.NewBuilder(flags)
+	if err != nil {
+		cmd.UI.Error(err.Error())
+		return nil
 	}
-	if flags.DevMode != nil && *flags.DevMode {
-		b.Head = append(b.Head, config.DevSource)
-	}
-	for _, file := range flags.ConfigFiles {
-		if err := b.ReadPath(file); err != nil {
-			cmd.UI.Error(err.Error())
-			return nil
-		}
-	}
-
 	cfg, err := b.BuildAndValidate()
 	if err != nil {
 		cmd.UI.Error(err.Error())

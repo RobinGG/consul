@@ -15,7 +15,6 @@ import (
 
 	"bytes"
 
-	"github.com/hashicorp/consul/agent/consul"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/types"
 	"github.com/pascaldekloe/goe/verify"
@@ -243,7 +242,6 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.SkipLeaveOnInt = true
 				rt.TaggedAddresses = map[string]string{"lan": "127.0.0.1", "wan": "127.0.0.1"}
-				rt.ConsulConfig = devConsulConfig(consul.DefaultConfig())
 			},
 		},
 		{
@@ -1441,27 +1439,29 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 					t.Fatalf("ParseFlags failed: %s", err)
 				}
 
+				// create the builder with the flags
+				b, err := NewBuilder(flags)
+				if err != nil {
+					t.Fatal("NewBuilder", err)
+				}
+				b.Head = append(b.Head, Source{Name: "data_dir", Format: "hcl", Data: `data_dir = "albjldjf"`})
+
 				// mock the hostname function unless a mock is provided
 				hostnameFn := tt.hostname
 				if hostnameFn == nil {
-					hostnameFn = func() (string, error) { return "nodex", nil }
+					b.Hostname = func() (string, error) { return "nodex", nil }
 				}
 
-				// create the builder with the flags
-				b := &Builder{
-					Flags: flags,
-					Head: []Source{
-						DefaultSource,
-						Source{Name: "data-dir", Format: "hcl", Data: `data_dir = "h8smrzKF"`},
-					},
-					Tail: []Source{
-						NonUserSource,
-						VersionSource("abcdef", "0.9.0", "test"),
-					},
-
-					Hostname:    hostnameFn,
-					PrivateIPv4: func() (*net.IPAddr, error) { return ipAddr("10.0.0.1"), nil },
-					PublicIPv6:  func() (*net.IPAddr, error) { return ipAddr("2001:db8:1000"), nil },
+				// mock the ip address detection
+				b.DetectIP = func(typ string) (*net.IPAddr, error) {
+					switch typ {
+					case "private_v4":
+						return ipAddr("10.0.0.1"), nil
+					case "private_v6":
+						return ipAddr("2001:db8::1000"), nil
+					default:
+						panic("invalid type: " + typ)
+					}
 				}
 
 				// read the source fragements
@@ -1486,7 +1486,6 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 					t.Fatalf("got no error want %q", tt.err)
 				}
 				if err != nil && tt.err != "" && !strings.Contains(err.Error(), tt.err) {
-
 					t.Fatalf("error %q does not contain %q", err.Error(), tt.err)
 				}
 
@@ -1502,13 +1501,9 @@ func TestConfigFlagsAndEdgecases(t *testing.T) {
 
 				// build the runtime config we expect
 				// from the same default config and patch it
-				x := &Builder{
-					Head:        b.Head,
-					Tail:        b.Tail,
-					Hostname:    b.Hostname,
-					PrivateIPv4: b.PrivateIPv4,
-					PublicIPv6:  b.PublicIPv6,
-				}
+				x := new(Builder)
+				*x = *b
+				x.Sources = nil
 				wantRT, err := x.Build()
 				if err != nil {
 					t.Fatalf("build default failed: %s", err)
@@ -2390,30 +2385,106 @@ func TestFullConfig(t *testing.T) {
 			}]
 		`}
 
-	nonUserSource := map[string]Source{
-		"json": Source{
-			Name:   "non-user.json",
-			Format: "json",
-			Data: `{
-				"acl_disabled_ttl": "957s",
-				"check_deregister_interval_min": "27870s",
-				"check_reap_interval": "10662s",
-				"ae_interval": "10003s",
-				"sync_coordinate_rate_target": 137.81,
-				"sync_coordinate_interval_min": "27983s"
-			}`,
+	tail := map[string][]Source{
+		"json": []Source{
+			{
+				Name:   "tail.non-user.json",
+				Format: "json",
+				Data: `
+				{
+					"acl_disabled_ttl": "957s",
+					"check_deregister_interval_min": "27870s",
+					"check_reap_interval": "10662s",
+					"ae_interval": "10003s",
+					"sync_coordinate_rate_target": 137.81,
+					"sync_coordinate_interval_min": "27983s"
+				}`,
+			},
+			{
+				Name:   "tail.consul.json",
+				Format: "json",
+				Data: `
+				{
+					"consul": {
+						"coordinate": {
+							"update_period": "25093s"
+						},
+						"raft": {
+							"election_timeout": "31947s",
+							"heartbeat_timeout": "25699s",
+							"leader_lease_timeout": "15351s"
+						},
+						"serf_lan": {
+							"memberlist": {
+								"gossip_interval": "25252s",
+								"probe_interval": "5105s",
+								"probe_timeout": "29179s",
+								"suspicion_mult": 8263
+							}
+						},
+						"serf_wan": {
+							"memberlist": {
+								"gossip_interval": "6966s",
+								"probe_interval": "20148s",
+								"probe_timeout": "3007s",
+								"suspicion_mult": 32096
+							}
+						},
+						"server": {
+							"health_interval": "17455s"
+						}
+					}
+				}`,
+			},
 		},
-		"hcl": Source{
-			Name:   "non-user.hcl",
-			Format: "hcl",
-			Data: `
-				acl_disabled_ttl = "957s"
-				check_deregister_interval_min = "27870s"
-				check_reap_interval = "10662s"
-				ae_interval = "10003s"
-				sync_coordinate_rate_target = 137.81
-				sync_coordinate_interval_min = "27983s"
-		`,
+		"hcl": []Source{
+			{
+				Name:   "tail.non-user.hcl",
+				Format: "hcl",
+				Data: `
+					acl_disabled_ttl = "957s"
+					check_deregister_interval_min = "27870s"
+					check_reap_interval = "10662s"
+					ae_interval = "10003s"
+					sync_coordinate_rate_target = 137.81
+					sync_coordinate_interval_min = "27983s"
+				`,
+			},
+			{
+				Name:   "tail.consul.hcl",
+				Format: "hcl",
+				Data: `
+					consul = {
+						coordinate = {
+							update_period = "25093s"
+						}
+						raft = {
+							election_timeout = "31947s"
+							heartbeat_timeout = "25699s"
+							leader_lease_timeout = "15351s"
+						}
+						serf_lan = {
+							memberlist = {
+								gossip_interval = "25252s"
+								probe_interval = "5105s"
+								probe_timeout = "29179s"
+								suspicion_mult = 8263
+							}
+						}
+						serf_wan = {
+							memberlist = {
+								gossip_interval = "6966s"
+								probe_interval = "20148s"
+								probe_timeout = "3007s"
+								suspicion_mult = 32096
+							}
+						}
+						server = {
+							health_interval = "17455s"
+						}
+					}
+				`,
+			},
 		},
 	}
 
@@ -2429,6 +2500,21 @@ func TestFullConfig(t *testing.T) {
 		Revision:          "JNtPSav3",
 		Version:           "R909Hblt",
 		VersionPrerelease: "ZT1JOQLn",
+
+		// consul configuration
+		ConsulCoordinateUpdatePeriod: 25093 * time.Second,
+		ConsulRaftElectionTimeout:    31947 * time.Second,
+		ConsulRaftHeartbeatTimeout:   25699 * time.Second,
+		ConsulRaftLeaderLeaseTimeout: 15351 * time.Second,
+		ConsulSerfLANGossipInterval:  25252 * time.Second,
+		ConsulSerfLANProbeInterval:   5105 * time.Second,
+		ConsulSerfLANProbeTimeout:    29179 * time.Second,
+		ConsulSerfLANSuspicionMult:   8263,
+		ConsulSerfWANGossipInterval:  6966 * time.Second,
+		ConsulSerfWANProbeInterval:   20148 * time.Second,
+		ConsulSerfWANProbeTimeout:    3007 * time.Second,
+		ConsulSerfWANSuspicionMult:   32096,
+		ConsulServerHealthInterval:   17455 * time.Second,
 
 		// user configurable values
 
@@ -2530,7 +2616,6 @@ func TestFullConfig(t *testing.T) {
 		},
 		CheckUpdateInterval:       16507 * time.Second,
 		ClientAddrs:               []*net.IPAddr{ipAddr("93.83.18.19")},
-		ConsulConfig:              devConsulConfig(consul.DefaultConfig()),
 		DNSAddrs:                  []net.Addr{tcpAddr("93.95.95.81:7001"), udpAddr("93.95.95.81:7001")},
 		DNSAllowStale:             true,
 		DNSDisableCompression:     true,
@@ -2864,15 +2949,13 @@ func TestFullConfig(t *testing.T) {
 			// 	t.Fatal(err)
 			// }
 
-			b := &Builder{
-				Flags:   flags,
-				Head:    []Source{DefaultSource},
-				Sources: []Source{{Name: "full", Format: format, Data: data}},
-				Tail: []Source{
-					nonUserSource[format],
-					VersionSource("JNtPSav3", "R909Hblt", "ZT1JOQLn"),
-				},
+			b, err := NewBuilder(flags)
+			if err != nil {
+				t.Fatalf("NewBuilder: %s", err)
 			}
+			b.Sources = append(b.Sources, Source{Name: "full", Format: format, Data: data})
+			b.Tail = append(b.Tail, tail[format]...)
+			b.Tail = append(b.Tail, VersionSource("JNtPSav3", "R909Hblt", "ZT1JOQLn"))
 
 			// construct the runtime config
 			rt, err := b.Build()
@@ -2881,7 +2964,7 @@ func TestFullConfig(t *testing.T) {
 			}
 
 			// verify that all fields are set
-			if !verify.Values(t, "", rt, want) {
+			if !verify.Values(t, "runtime_config", rt, want) {
 				t.FailNow()
 			}
 
