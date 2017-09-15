@@ -1709,7 +1709,7 @@ func TestFullConfig(t *testing.T) {
 			"node_name": "otlLxGaI",
 			"non_voting_server": true,
 			"performance": {
-				"raft_multiplier": 22057
+				"raft_multiplier": 5
 			},
 			"pid_file": "43xN80Km",
 			"ports": {
@@ -2132,7 +2132,7 @@ func TestFullConfig(t *testing.T) {
 			node_name = "otlLxGaI"
 			non_voting_server = true
 			performance {
-				raft_multiplier = 22057
+				raft_multiplier = 5
 			}
 			pid_file = "43xN80Km"
 			ports {
@@ -2574,7 +2574,7 @@ func TestFullConfig(t *testing.T) {
 		NodeMeta:                  map[string]string{"5mgGQMBk": "mJLtVMSG", "A7ynFMJB": "0Nx6RGab"},
 		NodeName:                  "otlLxGaI",
 		NonVotingServer:           true,
-		PerformanceRaftMultiplier: 22057,
+		PerformanceRaftMultiplier: 5,
 		PidFile:                   "43xN80Km",
 		RPCAdvertiseAddr:          tcpAddr("28.27.94.38:3757"),
 		RPCBindAddr:               tcpAddr("16.99.34.17:3757"),

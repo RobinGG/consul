@@ -128,12 +128,12 @@ func TestAgent_CheckPerformanceSettings(t *testing.T) {
 		a := NewTestAgent(t.Name(), `
 			bootstrap = false
 			performance {
-				raft_multiplier = 99
+				raft_multiplier = 8
 			}
 		`)
 		defer a.Shutdown()
 
-		const raftMult time.Duration = 99
+		const raftMult time.Duration = 8
 		r := a.consulConfig().RaftConfig
 		def := raft.DefaultConfig()
 		if r.HeartbeatTimeout != raftMult*def.HeartbeatTimeout ||
