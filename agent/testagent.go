@@ -332,7 +332,7 @@ func TestConfig(sources ...config.Source) *config.RuntimeConfig {
 			bind_addr = "127.0.0.1"
 			advertise_addr = "127.0.0.1"
 			datacenter = "dc1"
-			bootstratp = true
+			bootstrap = true
 			server = true
 			node_id = "` + nodeID + `"
 			node_name = "Node ` + nodeID + `"
@@ -340,9 +340,8 @@ func TestConfig(sources ...config.Source) *config.RuntimeConfig {
 	}
 
 	b := &config.Builder{
-		Head:    []config.Source{config.DefaultSource, testsrc},
-		Sources: sources,
-		Tail:    []config.Source{config.NonUserSource, config.DefaultVersionSource()},
+		Head: []config.Source{config.DefaultSource, testsrc},
+		Tail: append([]config.Source{config.NonUserSource, config.DefaultVersionSource()}, sources...),
 	}
 
 	cfg, err := b.BuildAndValidate()
@@ -378,18 +377,13 @@ func TestConfig(sources ...config.Source) *config.RuntimeConfig {
 
 // TestACLConfig returns a default configuration for testing an agent
 // with ACLs.
-func TestACLConfig(srcs ...config.Source) *config.RuntimeConfig {
-	src := config.Source{
-		Name:   "acl",
-		Format: "hcl",
-		Data: `
-			acl_datacenter = "dc1"
-			acl_default_policy = "deny"
-			acl_master_token = "root"
-			acl_agent_token = "root"
-			acl_agent_master_token = "towel"
-			acl_enforce_version8 = true
-		`,
-	}
-	return TestConfig(append([]config.Source{src}, srcs...)...)
+func TestACLConfig() string {
+	return `
+		acl_datacenter = "dc1"
+		acl_default_policy = "deny"
+		acl_master_token = "root"
+		acl_agent_token = "root"
+		acl_agent_master_token = "towel"
+		acl_enforce_version8 = true
+	`
 }

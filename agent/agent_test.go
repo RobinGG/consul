@@ -1216,6 +1216,7 @@ func TestAgent_PurgeCheckOnDuplicate(t *testing.T) {
 	    node_name = "Node `+nodeID+`"
 		data_dir = "`+dataDir+`"
 		server = false
+		bootstrap = false
 		enable_script_checks = true
 	`)
 	defer os.RemoveAll(dataDir)
@@ -1240,6 +1241,7 @@ func TestAgent_PurgeCheckOnDuplicate(t *testing.T) {
 	    node_name = "Node `+nodeID+`"
 		data_dir = "`+dataDir+`"
 		server = false
+		bootstrap = false
 		enable_script_checks = true
 		check = {
 			id = "mem"
