@@ -250,8 +250,6 @@ func TestAgent_setupNodeID(t *testing.T) {
 
 func TestAgent_makeNodeID(t *testing.T) {
 	t.Parallel()
-	cfg := TestConfig()
-	cfg.NodeID = ""
 	a := NewTestAgent(t.Name(), `
 		node_id = ""
 	`)
