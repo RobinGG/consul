@@ -240,6 +240,13 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 	srcs = append(srcs, toJson("flags.slices", flagSlices))
 	srcs = append(srcs, b.Sources...)
 	srcs = append(srcs, toJson("flags.values", flagValues))
+	for i, s := range b.Flags.HCL {
+		srcs = append(srcs, Source{
+			Name:   fmt.Sprintf("flag.hcl.%d", i),
+			Format: "hcl",
+			Data:   s,
+		})
+	}
 	srcs = append(srcs, b.Tail...)
 
 	// parse the config sources into a configuration

@@ -20,6 +20,9 @@ type Flags struct {
 	// mode. This cannot be configured in a config file.
 	DevMode *bool
 
+	// HCL contains an arbitrary config in hcl format.
+	HCL []string
+
 	// DeprecatedDatacenter holds the value for the `-dc` flag which is an alias
 	// for `-datacenter.
 	DeprecatedDatacenter *string
@@ -108,6 +111,7 @@ func AddFlags(fs *flag.FlagSet, f *Flags) {
 	add(&f.Config.EnableSyslog, "syslog", "Enables logging to syslog.")
 	add(&f.Config.EnableUI, "ui", "Enables the built-in static web UI server.")
 	add(&f.Config.UIDir, "ui-dir", "Path to directory containing the web UI resources.")
+	add(&f.HCL, "hcl", "hcl config fragment. Can be specified multiple times.")
 
 	// deprecated flags orderd by flag name
 	add(&f.DeprecatedAtlasInfrastructure, "atlas", "(deprecated) Sets the Atlas infrastructure name, enables SCADA.")
