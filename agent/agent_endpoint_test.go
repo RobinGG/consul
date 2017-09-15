@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/consul/acl"
+	"github.com/hashicorp/consul/agent/config"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/logger"
@@ -287,11 +288,22 @@ func TestAgent_Reload(t *testing.T) {
 		t.Fatalf("missing redis service")
 	}
 
-	cfg2 := TestConfig()
-	cfg2.ACLEnforceVersion8 = false
-	cfg2.Services = []*structs.ServiceDefinition{
-		&structs.ServiceDefinition{Name: "redis-reloaded"},
-	}
+	cfg2 := TestConfig(config.Source{
+		Name:   "reload",
+		Format: "hcl",
+		Data: `
+			data_dir = "` + a.Config.DataDir + `"
+			node_id = "` + string(a.Config.NodeID) + `"
+			node_name = "` + a.Config.NodeName + `"
+
+			acl_enforce_version8 = false
+			services = [
+				{
+					name = "redis-reloaded"
+				}
+			]
+		`,
+	})
 
 	if err := a.ReloadConfig(cfg2); err != nil {
 		t.Fatalf("got error %v want nil", err)
