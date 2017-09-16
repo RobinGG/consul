@@ -97,7 +97,6 @@ func NewBuilder(flags Flags) (*Builder, error) {
 
 	if b.boolVal(b.Flags.DevMode) {
 		b.Head = append(b.Head, DevSource())
-		b.Tail = append(b.Tail, DevConsulSource())
 	}
 
 	// Since the merge logic is to overwrite all fields with later
@@ -121,6 +120,9 @@ func NewBuilder(flags Flags) (*Builder, error) {
 		})
 	}
 	b.Tail = append(b.Tail, NonUserSource(), DefaultConsulSource(), DefaultVersionSource())
+	if b.boolVal(b.Flags.DevMode) {
+		b.Tail = append(b.Tail, DevConsulSource())
+	}
 	return b, nil
 }
 
