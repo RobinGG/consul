@@ -342,6 +342,16 @@ func (d *DNSServer) nameservers(edns bool) (ns []dns.RR, extra []dns.RR) {
 		ns = append(ns, nsrr)
 
 		// A or AAAA glue record
+		// todo(fs): I thought we had fixed that the addr contains a port
+		// todo(fs): addr can be either an ip or a ip:port. The latter trips
+		// todo(fs): the formatNodeRecord since it will generate a CNAME instead of
+		// todo(fs): an A or AAAA record.
+		fmt.Println("nameserver:", "addr:", addr)
+		host, _, err := net.SplitHostPort(addr)
+		if err == nil {
+			addr = host
+		}
+		fmt.Println("nameserver:", "addr:", addr, "host:", host, "err:", err)
 		glue := d.formatNodeRecord(addr, fqdn, dns.TypeANY, d.config.NodeTTL, edns)
 		extra = append(extra, glue...)
 
