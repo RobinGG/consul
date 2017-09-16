@@ -918,7 +918,7 @@ func TestDNS_NSRecords(t *testing.T) {
 }
 
 func TestDNS_NSRecords_IPV6(t *testing.T) {
-	t.Skip("This test fails because the RPC call for consul servers in nameservers() returns ip and ip:port values")
+	t.Fatal("This test fails because the RPC call for consul servers in nameservers() returns ip and ip:port values")
 	// todo(fs): I think this test fails because something changed in the advertise address handling
 	// todo(fs): you'd expect the server to announce '::1' but it announces "127.0.0.1"
 	// todo(fs): doesn't look like it. When the node address comes back with a port then it is '[::1]:25796'

@@ -101,9 +101,10 @@ func TestAgent_TokenStore(t *testing.T) {
 }
 
 func TestAgent_CheckPerformanceSettings(t *testing.T) {
-	t.Parallel()
-	t.Skip("this test fails because of the change in agent.consulConfig(). We need to decide what to do")
+	t.Fatal("this test fails because of the change in agent.consulConfig(). We need to decide what to do")
 	// todo(fs): this ^^
+
+	t.Parallel()
 
 	// Try a config with the default value; we have to insert it because the
 	// tests use raft_multiplier = 1 by default for speed.
