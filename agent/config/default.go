@@ -22,6 +22,9 @@ func DefaultRPCProtocol() (int, error) {
 
 // DefaultSource is the default agent configuration.
 // This needs to be merged first in the head.
+// todo(fs): The values are sourced from multiple sources.
+// todo(fs): IMO, this should be the definitive default for all configurable values
+// todo(fs): and whatever is in here should clobber every default value. Hence, no sourcing.
 func DefaultSource() Source {
 	return Source{
 		Name:   "default",
@@ -36,7 +39,7 @@ func DefaultSource() Source {
 		bootstrap_expect = 0
 		check_update_interval = "5m"
 		client_addr = "127.0.0.1"
-		datacenter = "dc1"
+		datacenter = "` + consul.DefaultDC + `"
 		disable_coordinates = false
 		disable_host_node_id = true
 		disable_remote_exec = true
@@ -62,15 +65,15 @@ func DefaultSource() Source {
 			rpc_max_burst = 1000
 		}
 		performance = {
-			raft_multiplier = 5
+			raft_multiplier = ` + strconv.Itoa(int(consul.DefaultRaftMultiplier)) + `
 		}
 		ports = {
 			dns = 8600
 			http = 8500
 			https = -1
-			serf_lan = 8301
-			serf_wan = 8302
-			server = 8300
+			serf_lan = ` + strconv.Itoa(consul.DefaultLANSerfPort) + `
+			serf_wan = ` + strconv.Itoa(consul.DefaultWANSerfPort) + `
+			server = ` + strconv.Itoa(consul.DefaultRPCPort) + `
 		}
 		telemetry = {
 			statsite_prefix = "consul"
