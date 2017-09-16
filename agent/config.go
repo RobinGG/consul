@@ -941,14 +941,15 @@ const (
 // done(fs): 	UnixSocketPermissions `mapstructure:",squash"`
 // done(fs): }
 // done(fs):
-// done(fs): // socketPath tests if a given address describes a domain socket,
-// done(fs): // and returns the relevant path part of the string if it is.
-// done(fs): func socketPath(addr string) string {
-// done(fs): 	if !strings.HasPrefix(addr, "unix://") {
-// done(fs): 		return ""
-// done(fs): 	}
-// done(fs): 	return strings.TrimPrefix(addr, "unix://")
-// done(fs): }
+// socketPath tests if a given address describes a domain socket,
+// and returns the relevant path part of the string if it is.
+func socketPath(addr string) string {
+	if !strings.HasPrefix(addr, "unix://") {
+		return ""
+	}
+	return strings.TrimPrefix(addr, "unix://")
+}
+
 // done(fs):
 // done(fs): type dirEnts []os.FileInfo
 // done(fs):
