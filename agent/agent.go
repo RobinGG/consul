@@ -585,14 +585,17 @@ func (a *Agent) consulConfig() (*consul.Config, error) {
 	base.CoordinateUpdateBatchSize = a.config.ConsulCoordinateBatchSize
 	base.CoordinateUpdateMaxBatches = a.config.ConsulCoordinateMaxBatches
 
-	base.RaftConfig.HeartbeatTimeout = a.config.ConsulRaftHeartbeatTimeout
-	base.RaftConfig.LeaderLeaseTimeout = a.config.ConsulRaftLeaderLeaseTimeout
-	base.RaftConfig.ElectionTimeout = a.config.ConsulRaftElectionTimeout
+	base.RaftConfig.HeartbeatTimeout = a.config.ConsulRaftHeartbeatTimeout * time.Duration(a.config.PerformanceRaftMultiplier)
+	base.RaftConfig.LeaderLeaseTimeout = a.config.ConsulRaftLeaderLeaseTimeout * time.Duration(a.config.PerformanceRaftMultiplier)
+	base.RaftConfig.ElectionTimeout = a.config.ConsulRaftElectionTimeout * time.Duration(a.config.PerformanceRaftMultiplier)
 
+	// todo(fs): ScaleRaft will scale the default values and not the overwrites
+	// todo(fs): using tuned values used to work because PerformanceRaftMultiplier was zero
+	// todo(fs): but once it was set > 0 it would not do what you'd expect it to do.
 	// Apply performance factors
-	if a.config.PerformanceRaftMultiplier > 0 {
-		base.ScaleRaft(a.config.PerformanceRaftMultiplier)
-	}
+	//	if a.config.PerformanceRaftMultiplier > 0 {
+	//		base.ScaleRaft(a.config.PerformanceRaftMultiplier)
+	//	}
 
 	base.SerfLANConfig.MemberlistConfig.BindAddr = a.config.SerfBindAddrLAN.IP.String()
 	base.SerfLANConfig.MemberlistConfig.BindPort = a.config.SerfPortLAN

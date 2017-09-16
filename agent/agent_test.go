@@ -100,6 +100,8 @@ func TestAgent_TokenStore(t *testing.T) {
 	}
 }
 
+// todo(fs): this test fails because of the change in agent.consulConfig()
+// todo(fs): we need to decide what to do
 func TestAgent_CheckPerformanceSettings(t *testing.T) {
 	t.Parallel()
 
