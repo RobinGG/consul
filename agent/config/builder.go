@@ -376,10 +376,10 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		}
 	}
 
-	// if the bind_addr is nil because of an error we set it to 127.0.0.1
+	// if the bind_addr is nil because of an error we set it to 127.99.99.99
 	// so that the process can continue and we find other errors.
 	if bindAddr == nil {
-		bindAddr = &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
+		bindAddr = &net.IPAddr{IP: net.ParseIP("127.99.99.99")}
 	}
 
 	detect := detectIP
@@ -402,7 +402,7 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		// bind address. Hence, the bind address configuration is the
 		// main issue.
 		b.err = multierror.Append(b.err, fmt.Errorf("bind_addr: %s", err))
-		advertiseAddr = &net.IPAddr{IP: net.ParseIP("127.0.0.1")}
+		advertiseAddr = &net.IPAddr{IP: net.ParseIP("127.98.98.98")}
 	}
 
 	// derive other bind addresses from the bindAddr
