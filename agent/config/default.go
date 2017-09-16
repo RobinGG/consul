@@ -134,6 +134,8 @@ func DefaultConsulSource() Source {
 		consul = {
 			coordinate = {
 				update_period = "` + cfg.CoordinateUpdatePeriod.String() + `"
+				batch_size = "` + strconv.Itoa(cfg.CoordinateUpdateBatchSize) + `"
+				max_batches = "` + strconv.Itoa(cfg.CoordinateUpdateMaxBatches) + `"
 			}
 			raft = {
 				election_timeout = "` + raft.ElectionTimeout.String() + `"
@@ -168,12 +170,14 @@ func DefaultConsulSource() Source {
 // This should be merged in the tail after the DefaultConsulSource.
 func DevConsulSource() Source {
 	return Source{
-		Name:   "consul",
+		Name:   "consul-dev",
 		Format: "hcl",
 		Data: `
 		consul = {
 			coordinate = {
 				update_period = "100ms"
+				batch_size = 128
+				max_batches = 5
 			}
 			raft = {
 				election_timeout = "40ms"

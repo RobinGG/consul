@@ -351,8 +351,8 @@ func TestConfig(sources ...config.Source) *config.RuntimeConfig {
 		panic("NewBuilder failed: " + err.Error())
 	}
 	b.Head = append(b.Head, testsrc)
+	b.Tail = append(b.Tail, config.DefaultConsulSource(), config.DevConsulSource())
 	b.Tail = append(b.Tail, sources...)
-	b.Tail = append(b.Tail, config.DevConsulSource())
 
 	cfg, err := b.BuildAndValidate()
 	if err != nil {

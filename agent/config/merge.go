@@ -5,7 +5,7 @@ import (
 	"reflect"
 )
 
-// Merge recusrively combines a set of config file structures into a single structure
+// Merge recursively combines a set of config file structures into a single structure
 // according to the following rules:
 //
 // * only values of type struct, slice, map and pointer to simple types are allowed. Other types panic.

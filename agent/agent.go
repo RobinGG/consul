@@ -574,11 +574,6 @@ func (a *Agent) consulConfig() (*consul.Config, error) {
 	// Apply dev mode
 	base.DevMode = a.config.DevMode
 
-	// Apply performance factors
-	if a.config.PerformanceRaftMultiplier > 0 {
-		base.ScaleRaft(a.config.PerformanceRaftMultiplier)
-	}
-
 	// Override with our config
 	// todo(fs): these are now always set in the runtime config so we can simplify this
 	// todo(fs): or is there a reason to keep it like that?
@@ -587,10 +582,17 @@ func (a *Agent) consulConfig() (*consul.Config, error) {
 	base.NodeName = a.config.NodeName
 
 	base.CoordinateUpdatePeriod = a.config.ConsulCoordinateUpdatePeriod
+	base.CoordinateUpdateBatchSize = a.config.ConsulCoordinateBatchSize
+	base.CoordinateUpdateMaxBatches = a.config.ConsulCoordinateMaxBatches
 
 	base.RaftConfig.HeartbeatTimeout = a.config.ConsulRaftHeartbeatTimeout
 	base.RaftConfig.LeaderLeaseTimeout = a.config.ConsulRaftLeaderLeaseTimeout
 	base.RaftConfig.ElectionTimeout = a.config.ConsulRaftElectionTimeout
+
+	// Apply performance factors
+	if a.config.PerformanceRaftMultiplier > 0 {
+		base.ScaleRaft(a.config.PerformanceRaftMultiplier)
+	}
 
 	base.SerfLANConfig.MemberlistConfig.BindAddr = a.config.SerfBindAddrLAN.IP.String()
 	base.SerfLANConfig.MemberlistConfig.BindPort = a.config.SerfPortLAN

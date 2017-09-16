@@ -120,7 +120,7 @@ func NewBuilder(flags Flags) (*Builder, error) {
 			Data:   s,
 		})
 	}
-	b.Tail = append(b.Tail, NonUserSource(), DevConsulSource(), DefaultVersionSource())
+	b.Tail = append(b.Tail, NonUserSource(), DefaultConsulSource(), DefaultVersionSource())
 	return b, nil
 }
 
@@ -641,6 +641,8 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 
 		// consul configuration
 		ConsulCoordinateUpdatePeriod: b.durationVal("consul.coordinate.update_period", c.Consul.Coordinate.UpdatePeriod),
+		ConsulCoordinateBatchSize:    b.intVal(c.Consul.Coordinate.BatchSize),
+		ConsulCoordinateMaxBatches:   b.intVal(c.Consul.Coordinate.MaxBatches),
 		ConsulRaftElectionTimeout:    b.durationVal("consul.raft.election_timeout", c.Consul.Raft.ElectionTimeout),
 		ConsulRaftHeartbeatTimeout:   b.durationVal("consul.raft.heartbeat_timeout", c.Consul.Raft.HeartbeatTimeout),
 		ConsulRaftLeaderLeaseTimeout: b.durationVal("consul.raft.leader_lease_timeout", c.Consul.Raft.LeaderLeaseTimeout),

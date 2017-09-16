@@ -29,6 +29,8 @@ type RuntimeConfig struct {
 
 	// consul config
 	ConsulCoordinateUpdatePeriod time.Duration
+	ConsulCoordinateBatchSize    int
+	ConsulCoordinateMaxBatches   int
 	ConsulRaftElectionTimeout    time.Duration
 	ConsulRaftHeartbeatTimeout   time.Duration
 	ConsulRaftLeaderLeaseTimeout time.Duration

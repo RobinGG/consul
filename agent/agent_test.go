@@ -102,6 +102,7 @@ func TestAgent_TokenStore(t *testing.T) {
 
 func TestAgent_CheckPerformanceSettings(t *testing.T) {
 	t.Parallel()
+
 	// Try a config with the default value; we have to insert it because the
 	// tests use raft_multiplier = 1 by default for speed.
 	{
@@ -1085,7 +1086,6 @@ func TestAgent_PurgeServiceOnDuplicate(t *testing.T) {
 	a2.Start()
 	defer a2.Shutdown()
 
-	// todo(kh): Not sure why the config changes would have stopped this from purging the old file
 	file := filepath.Join(a.Config.DataDir, servicesDir, stringHash(svc1.ID))
 	if _, err := os.Stat(file); err == nil {
 		t.Fatalf("should have removed persisted service")

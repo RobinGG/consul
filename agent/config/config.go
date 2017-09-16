@@ -181,6 +181,8 @@ type Config struct {
 type Consul struct {
 	Coordinate *struct {
 		UpdatePeriod *string `json:"update_period,omitempty" hcl:"update_period"`
+		BatchSize    *int    `json:"batch_size,omitempty" hcl:"batch_size"`
+		MaxBatches   *int    `json:"max_batches,omitempty" hcl:"max_batches"`
 	} `json:"coordinate,omitempty" hcl:"coordinate"`
 
 	Raft *struct {
