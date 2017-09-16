@@ -642,9 +642,9 @@ func (b *Builder) Build() (rt RuntimeConfig, err error) {
 		VersionPrerelease:          b.stringVal(c.VersionPrerelease),
 
 		// consul configuration
-		ConsulCoordinateUpdatePeriod: b.durationVal("consul.coordinate.update_period", c.Consul.Coordinate.UpdatePeriod),
 		ConsulCoordinateBatchSize:    b.intVal(c.Consul.Coordinate.BatchSize),
 		ConsulCoordinateMaxBatches:   b.intVal(c.Consul.Coordinate.MaxBatches),
+		ConsulCoordinateUpdatePeriod: b.durationVal("consul.coordinate.update_period", c.Consul.Coordinate.UpdatePeriod),
 		ConsulRaftElectionTimeout:    b.durationVal("consul.raft.election_timeout", c.Consul.Raft.ElectionTimeout),
 		ConsulRaftHeartbeatTimeout:   b.durationVal("consul.raft.heartbeat_timeout", c.Consul.Raft.HeartbeatTimeout),
 		ConsulRaftLeaderLeaseTimeout: b.durationVal("consul.raft.leader_lease_timeout", c.Consul.Raft.LeaderLeaseTimeout),

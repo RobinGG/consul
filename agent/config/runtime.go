@@ -28,9 +28,9 @@ type RuntimeConfig struct {
 	VersionPrerelease          string
 
 	// consul config
-	ConsulCoordinateUpdatePeriod time.Duration
 	ConsulCoordinateBatchSize    int
 	ConsulCoordinateMaxBatches   int
+	ConsulCoordinateUpdatePeriod time.Duration
 	ConsulRaftElectionTimeout    time.Duration
 	ConsulRaftHeartbeatTimeout   time.Duration
 	ConsulRaftLeaderLeaseTimeout time.Duration

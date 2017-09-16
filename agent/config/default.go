@@ -145,9 +145,9 @@ func DefaultConsulSource() Source {
 		Data: `
 		consul = {
 			coordinate = {
-				update_period = "` + cfg.CoordinateUpdatePeriod.String() + `"
 				batch_size = "` + strconv.Itoa(cfg.CoordinateUpdateBatchSize) + `"
 				max_batches = "` + strconv.Itoa(cfg.CoordinateUpdateMaxBatches) + `"
+				update_period = "` + cfg.CoordinateUpdatePeriod.String() + `"
 			}
 			raft = {
 				election_timeout = "` + raft.ElectionTimeout.String() + `"
@@ -187,9 +187,9 @@ func DevConsulSource() Source {
 		Data: `
 		consul = {
 			coordinate = {
-				update_period = "100ms"
 				batch_size = 128
 				max_batches = 5
+				update_period = "100ms"
 			}
 			raft = {
 				election_timeout = "40ms"
