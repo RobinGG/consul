@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hashicorp/consul/agent"
+	"github.com/hashicorp/consul/agent/config"
 	"github.com/hashicorp/consul/configutil"
 )
 
@@ -58,8 +58,12 @@ func (c *ValidateCommand) Run(args []string) int {
 		return 1
 	}
 
-	_, err := agent.ReadConfigPaths(configFiles)
+	b, err := config.NewBuilder(config.Flags{ConfigFiles: configFiles})
 	if err != nil {
+		c.UI.Error(fmt.Sprintf("Config validation failed: %v", err.Error()))
+		return 1
+	}
+	if _, err := b.BuildAndValidate(); err != nil {
 		c.UI.Error(fmt.Sprintf("Config validation failed: %v", err.Error()))
 		return 1
 	}

@@ -8,6 +8,18 @@ import (
 	"github.com/hashicorp/consul/version"
 )
 
+func DefaultRPCProtocol() (int, error) {
+	src := DefaultSource()
+	c, err := Parse(src.Data, src.Format)
+	if err != nil {
+		return 0, fmt.Errorf("Error parsing default config: %s", err)
+	}
+	if c.RPCProtocol == nil {
+		return 0, fmt.Errorf("No default RPC protocol set")
+	}
+	return *c.RPCProtocol, nil
+}
+
 // DefaultSource is the default agent configuration.
 // This needs to be merged first in the head.
 func DefaultSource() Source {
